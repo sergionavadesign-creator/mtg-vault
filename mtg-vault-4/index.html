@@ -9,6 +9,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0a0a0f; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
@@ -34,12 +35,93 @@
     const CONDITION_LABELS = { NM:"Near Mint", LP:"Lightly Played", MP:"Moderately Played", HP:"Heavily Played" };
     const AVATARS = ["🧙","🧝","🐉","🦁","🌙","⚡","🌊","🔥","🌿","💀","🛡️","⚔️"];
 
-    // ── STORAGE ──────────────────────────────────────────────
-    function loadData() {
+    // ── SUPABASE ─────────────────────────────────────────────
+    // Aggiorna con le tue chiavi da supabase.com → Settings → API
+    const SUPABASE_URL = "https://tjznhpseecbxitkivkqf.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRqem5ocHNlZWNieGl0a2l2a3FmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTg2MzQsImV4cCI6MjA5ODMzNDYzNH0.KzBEzJcGeUx9C7qb5hadsSqbUyMwjdShACCpeXor6h0";
+    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // Fallback localStorage durante configurazione
+    function loadLocalData() {
       try { const r = localStorage.getItem("mtg_vault_v4"); if (r) return JSON.parse(r); } catch {}
       return { profiles: [], decks: [] };
     }
-    function saveData(d) { try { localStorage.setItem("mtg_vault_v4", JSON.stringify(d)); } catch {} }
+    function saveLocalData(d) { try { localStorage.setItem("mtg_vault_v4", JSON.stringify(d)); } catch {} }
+
+    async function loadData() {
+      try {
+        const [{ data: profiles }, { data: cards }, { data: decks }] = await Promise.all([
+          sb.from("profiles").select("*").order("created_at"),
+          sb.from("cards").select("*").order("added_at"),
+          sb.from("decks").select("*").order("created_at"),
+        ]);
+        // Assemble: attach cards to profiles
+        const assembled = {
+          profiles: (profiles||[]).map(p => ({
+            ...p,
+            cards: (cards||[]).filter(c => c.profile_id === p.id).map(c => ({
+              ...c, id: c.id, scryfallId: c.scryfall_id, set: c.set_name,
+              setCode: c.set_code, collectorNumber: c.collector_number,
+              manaCost: c.mana_cost, type: c.type_line, image: c.image,
+            }))
+          })),
+          decks: (decks||[]).map(d => ({
+            ...d, ownerId: d.profile_id,
+            cards: d.cards || []
+          }))
+        };
+        saveLocalData(assembled); // cache locale
+        return assembled;
+      } catch(e) {
+        console.warn("Supabase not configured, using localStorage", e);
+        return loadLocalData();
+      }
+    }
+
+    async function saveProfile(profile) {
+      try {
+        const { data, error } = await sb.from("profiles").upsert({
+          id: profile.id, name: profile.name, avatar: profile.avatar
+        }).select().single();
+        if (error) throw error;
+        return data;
+      } catch(e) { console.error("saveProfile error", e); return profile; }
+    }
+
+    async function deleteProfile(id) {
+      try { await sb.from("profiles").delete().eq("id", id); } catch(e) { console.error(e); }
+    }
+
+    async function saveCard(card, profileId) {
+      try {
+        const row = {
+          id: card.id, profile_id: profileId, scryfall_id: card.scryfallId,
+          name: card.name, set_name: card.set, set_code: card.setCode,
+          collector_number: card.collectorNumber, rarity: card.rarity,
+          mana_cost: card.manaCost, colors: card.colors, type_line: card.type,
+          legalities: card.legalities, prices: card.prices, image: card.image,
+          condition: card.condition, qty: card.qty
+        };
+        await sb.from("cards").upsert(row);
+      } catch(e) { console.error("saveCard error", e); }
+    }
+
+    async function deleteCard(id) {
+      try { await sb.from("cards").delete().eq("id", id); } catch(e) { console.error(e); }
+    }
+
+    async function saveDeck(deck) {
+      try {
+        await sb.from("decks").upsert({
+          id: deck.id, profile_id: deck.ownerId, name: deck.name,
+          format: deck.format, cards: deck.cards
+        });
+      } catch(e) { console.error("saveDeck error", e); }
+    }
+
+    async function deleteDeck(id) {
+      try { await sb.from("decks").delete().eq("id", id); } catch(e) { console.error(e); }
+    }
 
     // ── SCRYFALL ─────────────────────────────────────────────
     async function searchCard(query) {
@@ -52,14 +134,36 @@
       } catch { return null; }
     }
 
+    // Detect likely language from query (basic heuristic)
+    function detectLang(q) {
+      const itWords = ["isola","foresta","montagna","palude","pianura","fulmine","creatura","magia","artefatto","incantesimo","terra","bianco","nero","rosso","verde","blu","leggendario","istantaneo","magia","stregoneria"];
+      const lower = q.toLowerCase();
+      if (itWords.some(w => lower===w || lower.startsWith(w+" "))) return "it";
+      return "en";
+    }
+
     async function searchCardMulti(query) {
       try {
-        // Prima prova ricerca full-text per nome
-        const r = await fetch(`https://api.scryfall.com/cards/search?q=name%3A${encodeURIComponent('"'+query+'"')}&order=name&limit=20`);
-        if (r.ok) { const d = await r.json(); if (d.data?.length) return d.data; }
-        // Fallback: ricerca generica
-        const r2 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=name&limit=20`);
-        if (r2.ok) { const d2 = await r2.json(); return d2.data || []; }
+        const q = query.trim();
+        const lang = detectLang(q);
+
+        if (lang === "it") {
+          // 1. Nome esatto italiano (printed_name)
+          const r1 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'" lang:it')}&unique=prints&order=released&limit=30`);
+          if (r1.ok) { const d = await r1.json(); if (d.data?.length) return d.data; }
+          // 2. Nome parziale italiano
+          const r2 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'" lang:it')}&unique=prints&order=released&limit=30`);
+          if (r2.ok) { const d = await r2.json(); if (d.data?.length) return d.data; }
+        }
+
+        // 3. Nome esatto inglese
+        const r3 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'"')}&unique=prints&order=released&limit=30`);
+        if (r3.ok) { const d = await r3.json(); if (d.data?.length) return d.data; }
+
+        // 4. Nome parziale inglese
+        const r4 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'"')}&unique=prints&order=released&limit=30`);
+        if (r4.ok) { const d = await r4.json(); if (d.data?.length) return d.data; }
+
         return [];
       } catch { return []; }
     }
@@ -147,6 +251,49 @@
       const [status, setStatus] = useState("Inquadra la carta MTG");
       const [manualName, setManualName] = useState("");
       const [results, setResults] = useState([]); // lista risultati multipli
+      const [suggestions, setSuggestions] = useState([]); // autocomplete
+      const [showSugg, setShowSugg] = useState(false);
+      const debounceRef = useRef(null);
+
+      // Autocomplete multilingua
+      function handleTypeahead(val) {
+        setManualName(val);
+        setSuggestions([]);
+        setShowSugg(false);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        if (val.trim().length < 2) return;
+        debounceRef.current = setTimeout(async () => {
+          try {
+            const lang = detectLang(val);
+            let names = [];
+            if (lang === "it") {
+              // Cerca nomi italiani
+              const r = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:'+val+' lang:it')}&unique=names&limit=12`);
+              if (r.ok) {
+                const d = await r.json();
+                names = (d.data || []).map(c => c.printed_name || c.name).filter(Boolean);
+              }
+            }
+            // Sempre aggiungi suggerimenti inglesi come fallback
+            const rEn = await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(val)}&include_extras=false`);
+            if (rEn.ok) {
+              const dEn = await rEn.json();
+              // Merge: italiano prima, poi inglese
+              const enNames = dEn.data || [];
+              names = [...new Set([...names, ...enNames])].slice(0, 8);
+            }
+            if (names.length) { setSuggestions(names); setShowSugg(true); }
+          } catch {}
+        }, 280);
+      }
+
+      function pickSuggestion(name) {
+        setManualName(name);
+        setSuggestions([]);
+        setShowSugg(false);
+        // Avvia ricerca automaticamente
+        setTimeout(() => doManualSearch(name), 50);
+      }
 
       useEffect(() => {
         navigator.mediaDevices?.getUserMedia({ video: { facingMode:"environment" } })
@@ -155,45 +302,58 @@
         return () => { stream?.getTracks().forEach(t => t.stop()); };
       }, []);
 
+      const OCR_SERVER = "https://mtg-ocr-server-1.onrender.com";
+
       async function capture() {
         if (!videoRef.current || !canvasRef.current) return;
-        setScanning(true); setResults([]); setStatus("Analisi immagine in corso…");
+        setScanning(true); setResults([]); setStatus("Acquisizione immagine…");
         const v = videoRef.current; const c = canvasRef.current;
         c.width = v.videoWidth; c.height = v.videoHeight;
         c.getContext("2d").drawImage(v, 0, 0);
-        const base64 = c.toDataURL("image/jpeg", 0.8).split(",")[1];
+
         try {
-          const res = await fetch("https://api.anthropic.com/v1/messages", {
-            method:"POST", headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({
-              model:"claude-sonnet-4-6", max_tokens:100,
-              messages:[{ role:"user", content:[
-                { type:"image", source:{ type:"base64", media_type:"image/jpeg", data:base64 }},
-                { type:"text", text:"This is a Magic: The Gathering card. Reply with ONLY the exact card name in English, nothing else. If you cannot identify it, reply UNKNOWN." }
-              ]}]
-            })
-          });
-          const d = await res.json();
-          const name = d.content?.[0]?.text?.trim();
-          if (!name || name==="UNKNOWN") { setStatus("Carta non riconosciuta — cerca manualmente"); setScanning(false); return; }
+          setStatus("Invio al server OCR…");
+          const blob = await new Promise(res => c.toBlob(res, "image/jpeg", 0.85));
+          const formData = new FormData();
+          formData.append("image", blob, "card.jpg");
+
+          const res = await fetch(`${OCR_SERVER}/recognize`, { method:"POST", body:formData });
+          if (!res.ok) throw new Error(`Server error: ${res.status}`);
+          const { name, confidence } = await res.json();
+
+          if (!name || name.length < 2) {
+            setStatus("Testo non leggibile — inquadra meglio la carta o cerca manualmente");
+            setScanning(false); return;
+          }
           setManualName(name);
-          setStatus(`Identificata: "${name}" — cercando varianti…`);
-          const cards = await searchCardMulti(name);
-          if (cards.length) { setResults(cards); setStatus(`${cards.length} varianti trovate — scegli quella che hai:`); }
-          else { setStatus("Carta non trovata su Scryfall — prova ricerca manuale"); }
-        } catch { setStatus("Errore — usa ricerca manuale"); }
+          setStatus(`Letto: "${name}" (${confidence}%) — cercando edizioni…`);
+
+          const [enCards, itCards] = await Promise.all([
+            searchCardMulti(name),
+            fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+ name +'" lang:it')}&unique=prints&order=released&limit=30`).then(r=>r.ok?r.json().then(d=>d.data||[]):[]).catch(()=>[])
+          ]);
+          const allCards = [...itCards, ...enCards.filter(e => !itCards.find(i => i.set===e.set && i.collector_number===e.collector_number))];
+          if (allCards.length) { setResults(allCards); setStatus(`${allCards.length} edizioni trovate — scegli quella che hai:`); }
+          else { setStatus(`"${name}" non trovata — prova a correggere il nome qui sotto`); }
+
+        } catch(e) {
+          console.error(e);
+          setStatus("Errore connessione server — usa ricerca manuale");
+        }
         setScanning(false);
       }
 
-      async function manualSearch() {
-        if (!manualName.trim()) return;
-        setScanning(true); setResults([]); setStatus("Cercando…");
-        const cards = await searchCardMulti(manualName.trim());
+      async function doManualSearch(name) {
+        const q = (name || manualName).trim();
+        if (!q) return;
+        setScanning(true); setResults([]); setShowSugg(false); setStatus("Cercando…");
+        const cards = await searchCardMulti(q);
         if (cards.length===1) { stream?.getTracks().forEach(t => t.stop()); onFound(cards[0]); }
-        else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} risultati — seleziona la carta:`); }
+        else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} edizioni trovate — scegli quella che hai:`); }
         else { setStatus("Nessuna carta trovata. Controlla il nome."); }
         setScanning(false);
       }
+      const manualSearch = () => doManualSearch(manualName);
 
       function pickCard(card) {
         stream?.getTracks().forEach(t => t.stop());
@@ -222,15 +382,28 @@
               </>
             )}
 
-            {/* Search bar sempre visibile */}
-            <div style={{display:"flex", gap:8, marginTop:results.length?0:12}}>
-              <input style={{...S.inp, flex:1}}
-                placeholder="Nome carta (es. Isola, Lightning Bolt…)"
-                value={manualName}
-                onChange={e => { setManualName(e.target.value); setResults([]); setStatus(""); }}
-                onKeyDown={e => e.key==="Enter" && manualSearch()}
-                autoFocus={results.length===0} />
-              <button style={S.btnP} onClick={manualSearch} disabled={scanning}>🔍</button>
+            {/* Search bar con autocomplete */}
+            <div style={{position:"relative", marginTop:results.length?0:12}}>
+              <div style={{display:"flex", gap:8}}>
+                <input style={{...S.inp, flex:1}}
+                  placeholder="Scrivi il nome (es. Isola, Lightning…)"
+                  value={manualName}
+                  onChange={e => { handleTypeahead(e.target.value); setResults([]); setStatus(""); }}
+                  onKeyDown={e => { if(e.key==="Enter"){ e.preventDefault(); manualSearch(); } if(e.key==="Escape") setShowSugg(false); }}
+                  onBlur={() => setTimeout(()=>setShowSugg(false), 150)}
+                  onFocus={() => suggestions.length>0 && setShowSugg(true)}
+                  autoFocus={results.length===0} />
+                <button style={S.btnP} onClick={manualSearch} disabled={scanning}>🔍</button>
+              </div>
+              {showSugg && suggestions.length>0 && (
+                <div style={S.suggBox}>
+                  {suggestions.map((name,i) => (
+                    <div key={i} style={S.suggItem} onMouseDown={()=>pickSuggestion(name)}>
+                      🃏 {name}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Status quando ci sono risultati */}
@@ -241,23 +414,31 @@
             {/* Lista risultati */}
             {results.length>0 && (
               <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}}>
-                {results.map(card => (
-                  <div key={card.id} style={S.resultRow} onClick={() => pickCard(card)}>
-                    {cardImage(card)
-                      ? <img src={cardImage(card)} alt={card.name} style={S.resultImg}/>
-                      : <div style={S.resultImgPlaceholder}>🃏</div>
-                    }
-                    <div style={{flex:1, minWidth:0}}>
-                      <div style={{fontWeight:700, fontSize:13}}>{card.name}</div>
-                      <div style={{fontSize:11, color:"#94a3b8", marginTop:2}}>{card.set_name} · #{card.collector_number}</div>
-                      <div style={{fontSize:11, color:"#64748b"}}>{card.type_line}</div>
+                {results.map(card => {
+                  const year = card.released_at ? card.released_at.slice(0,4) : "";
+                  const langFlag = {en:"🇬🇧",it:"🇮🇹",fr:"🇫🇷",de:"🇩🇪",es:"🇪🇸",pt:"🇵🇹",ja:"🇯🇵",ko:"🇰🇷",ru:"🇷🇺",zhs:"🇨🇳",zht:"🇨🇳"}[card.lang] || card.lang?.toUpperCase() || "";
+                  return (
+                    <div key={card.id} style={S.resultRow} onClick={() => pickCard(card)}>
+                      {cardImage(card)
+                        ? <img src={cardImage(card)} alt={card.name} style={S.resultImg}/>
+                        : <div style={S.resultImgPlaceholder}>🃏</div>
+                      }
+                      <div style={{flex:1, minWidth:0}}>
+                        <div style={{fontWeight:700, fontSize:13}}>{card.name}</div>
+                        <div style={{fontSize:11, color:"#94a3b8", marginTop:2}}>{card.set_name}</div>
+                        <div style={{display:"flex", gap:8, marginTop:3, alignItems:"center"}}>
+                          <span style={{fontSize:10, color:"#64748b"}}>{year}</span>
+                          <span style={{fontSize:11}}>{langFlag}</span>
+                          <span style={{fontSize:10, color:"#64748b", textTransform:"uppercase"}}>{card.rarity}</span>
+                        </div>
+                      </div>
+                      <div style={{textAlign:"right", flexShrink:0}}>
+                        <div style={{fontSize:14, fontWeight:700, color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
+                        <div style={{fontSize:10, color:"#4e9af1", marginTop:3}}>#{card.collector_number}</div>
+                      </div>
                     </div>
-                    <div style={{textAlign:"right", flexShrink:0}}>
-                      <div style={{fontSize:14, fontWeight:700, color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
-                      <div style={{fontSize:10, color:"#64748b", textTransform:"uppercase", marginTop:2}}>{card.rarity}</div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
@@ -324,8 +505,13 @@
 
     // ── MAIN APP ─────────────────────────────────────────────
     function App() {
-      const [data, setData] = useState(loadData);
+      const [data, setData] = useState({ profiles: [], decks: [] });
+      const [loading, setLoading] = useState(true);
       const [activeProfileId, setActiveProfileId] = useState(null);
+
+      useEffect(() => {
+        loadData().then(d => { setData(d); setLoading(false); });
+      }, []);
       const [tab, setTab] = useState("collection");
       const [showScan, setShowScan] = useState(false);
       const [confirmCard, setConfirmCard] = useState(null);
@@ -341,43 +527,72 @@
       const [budget, setBudget] = useState(50);
       const [advisorResult, setAdvisorResult] = useState(null);
       const [advising, setAdvising] = useState(false);
+      const [advisorMode, setAdvisorMode] = useState("analyze"); // analyze | build
+      const [deckStyle, setDeckStyle] = useState("aggressivo");
+      const [deckStyleDesc, setDeckStyleDesc] = useState("");
+      const [buildFormat, setBuildFormat] = useState("Commander");
+      const [buildResult, setBuildResult] = useState(null);
+      const [building, setBuilding] = useState(false);
+      const [explainCard, setExplainCard] = useState(null);
+      const [explainText, setExplainText] = useState(null);
+      const [explaining, setExplaining] = useState(false);
 
-      const persist = useCallback(d => { setData(d); saveData(d); }, []);
+      const persist = useCallback(d => { setData(d); saveLocalData(d); }, []);
 
       const activeProfile = data.profiles.find(p => p.id === activeProfileId);
       const collection = activeProfile?.cards || [];
       const currentDeck = data.decks.find(d => d.id === activeDeck);
 
       // Profile management
-      function createProfile(name, avatar) {
-        const p = { id: Date.now(), name, avatar, cards: [], createdAt: new Date().toISOString() };
-        persist({ ...data, profiles: [...data.profiles, p] });
+      async function createProfile(name, avatar) {
+        const p = { id: crypto.randomUUID(), name, avatar, cards: [] };
+        const saved = await saveProfile(p);
+        const newData = { ...data, profiles: [...data.profiles, { ...p, ...saved }] };
+        persist(newData);
       }
-      function deleteProfile(id) {
+      async function handleDeleteProfile(id) {
         if (!confirm("Eliminare questo profilo e tutte le sue carte?")) return;
+        await deleteProfile(id);
         persist({ ...data, profiles: data.profiles.filter(p => p.id !== id), decks: data.decks.filter(d => d.ownerId !== id) });
       }
 
       // Card management
-      function addCard(card, condition, qty) {
+      async function addCard(card, condition, qty) {
         const newCard = {
-          id: Date.now()+Math.random(), scryfallId:card.id, name:card.name,
+          id: crypto.randomUUID(), scryfallId:card.id, name:card.name,
           set:card.set_name, setCode:card.set, collectorNumber:card.collector_number,
           rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[],
           type:card.type_line||"", legalities:card.legalities||{}, prices:card.prices||{},
           image:cardImage(card), condition, qty, addedAt:new Date().toISOString()
         };
+        await saveCard(newCard, activeProfileId);
         const u = { ...data, profiles: data.profiles.map(p =>
           p.id===activeProfileId ? { ...p, cards: [...(p.cards||[]), newCard] } : p
         )};
         persist(u); setConfirmCard(null); setShowScan(false);
       }
 
-      function removeCard(id) {
+      async function removeCard(id) {
+        await deleteCard(id);
         const u = { ...data, profiles: data.profiles.map(p =>
           p.id===activeProfileId ? { ...p, cards: (p.cards||[]).filter(c => c.id!==id) } : p
         )};
         persist(u); setSelectedCard(null);
+      }
+
+      async function updateQty(id, delta) {
+        const profile = data.profiles.find(p => p.id===activeProfileId);
+        const card = profile?.cards?.find(c => c.id===id);
+        if (!card) return;
+        const newQty = (card.qty||1) + delta;
+        if (newQty < 1) { await removeCard(id); return; }
+        const updatedCard = { ...card, qty: newQty };
+        await saveCard(updatedCard, activeProfileId);
+        const u = { ...data, profiles: data.profiles.map(p => {
+          if (p.id!==activeProfileId) return p;
+          return { ...p, cards: (p.cards||[]).map(c => c.id===id ? updatedCard : c) };
+        })};
+        persist(u);
       }
 
       const filteredCollection = collection.filter(c => {
@@ -388,26 +603,31 @@
       const totalValue = collection.reduce((s,c) => s+cardPrice(c)*c.qty, 0);
 
       // Deck management
-      function createDeck() {
+      async function createDeck() {
         if (!deckName.trim()) return;
-        const deck = { id:Date.now(), name:deckName, format:deckFormat, cards:[], ownerId:activeProfileId, createdAt:new Date().toISOString() };
+        const deck = { id:crypto.randomUUID(), name:deckName, format:deckFormat, cards:[], ownerId:activeProfileId };
+        await saveDeck(deck);
         persist({ ...data, decks: [...data.decks, deck] });
         setDeckName(""); setActiveDeck(deck.id); setDeckView("build");
       }
-      function addToDeck(deckId, card) {
+      async function addToDeck(deckId, card) {
         const u = { ...data };
         const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
         if (card.legalities?.[deck.format.toLowerCase()]!=="legal") { alert(`${card.name} non è legale in ${deck.format}!`); return; }
         const ex = deck.cards.find(c => c.scryfallId===card.scryfallId);
         if (ex) ex.qty=(ex.qty||1)+1; else deck.cards.push({...card,qty:1});
+        await saveDeck(deck);
         persist(u);
       }
-      function removeFromDeck(deckId, cardId) {
+      async function removeFromDeck(deckId, cardId) {
         const u = { ...data };
         const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
-        deck.cards = deck.cards.filter(c => c.id!==cardId); persist(u);
+        deck.cards = deck.cards.filter(c => c.id!==cardId);
+        await saveDeck(deck);
+        persist(u);
       }
-      function deleteDeck(deckId) {
+      async function handleDeleteDeck(deckId) {
+        await deleteDeck(deckId);
         persist({ ...data, decks: data.decks.filter(d => d.id!==deckId) });
         if (activeDeck===deckId) { setActiveDeck(null); setDeckView("list"); }
       }
@@ -422,27 +642,15 @@
         const deck = data.decks.find(d => d.id===parseInt(advisorDeck)); if (!deck) return;
         setAdvising(true); setAdvisorResult(null);
         const summary = deck.cards.map(c => `${c.qty||1}x ${c.name} (${c.type}, ${c.manaCost})`).join("\n");
-        const prompt = `Sei un esperto di Magic: The Gathering. Analizza questo mazzo in formato ${deck.format} e suggerisci miglioramenti concreti.
-
-MAZZO ATTUALE:
-${summary || "(mazzo vuoto — suggerisci una strategia di base)"}
-
-BUDGET MASSIMO: €${budget}
-
-Rispondi in italiano con queste sezioni:
-**Analisi del mazzo**
-(punti di forza e debolezze)
-
-**Carte da rimuovere**
-- Nome carta — motivazione
-
-**Carte da aggiungere**
-- Nome carta — €X stimato — https://www.cardmarket.com/it/Magic/Products/Singles?searchString=NomeCarta
-
-**Strategia consigliata**
-(2-3 righe)
-
-Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
+        const prompt = "Sei un esperto di Magic: The Gathering. Analizza questo mazzo in formato "+deck.format+" e suggerisci miglioramenti concreti.\n\n"+
+          "MAZZO ATTUALE:\n"+(summary||"(mazzo vuoto)")+"\n\n"+
+          "BUDGET MASSIMO: €"+budget+"\n\n"+
+          "Rispondi in italiano con:\n"+
+          "**Analisi del mazzo**\n(punti di forza e debolezze)\n\n"+
+          "**Carte da rimuovere**\n- Nome carta — motivazione\n\n"+
+          "**Carte da aggiungere**\n- Nome carta — €X stimato — link Cardmarket\n\n"+
+          "**Strategia consigliata**\n(2-3 righe)\n\n"+
+          "Budget rigoroso: €"+budget+". Solo carte legali in "+deck.format+".";
 
         try {
           const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -453,6 +661,61 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
           setAdvisorResult(d.content?.[0]?.text || "Nessuna risposta.");
         } catch { setAdvisorResult("Errore di connessione. Riprova."); }
         setAdvising(false);
+      }
+
+      // Spiega carta in italiano
+      async function explainCardFn(card) {
+        setExplainCard(card);
+        setExplainText(null);
+        setExplaining(true);
+        const prompt = "Sei un esperto di Magic: The Gathering. Spiega in italiano questa carta:\n\n"+
+          "Nome: "+card.name+"\nTipo: "+card.type+"\nCosto mana: "+(card.manaCost||"N/A")+"\nSet: "+card.set+"\nRarità: "+card.rarity+"\n\n"+
+          "Spiega in italiano:\n"+
+          "1. **Cosa fa** (spiegazione semplice dell'effetto)\n"+
+          "2. **Come si usa** (quando e perché giocarla)\n"+
+          "3. **Sinergie** (con quali altri tipi di carte funziona bene)\n"+
+          "4. **Punti di forza e debolezza**\n\n"+
+          "Sii conciso ma completo. Linguaggio accessibile anche per chi non è esperto.";
+
+        try {
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:600, messages:[{role:"user",content:prompt}] })
+          });
+          const d = await res.json();
+          setExplainText(d.content?.[0]?.text || "Spiegazione non disponibile.");
+        } catch { setExplainText("Errore di connessione. Riprova."); }
+        setExplaining(false);
+      }
+
+      // Costruisce mazzo dalle carte in collezione
+      async function buildDeckFromCollection() {
+        setBuilding(true); setBuildResult(null);
+        const allCards = collection.map(c => c.qty+"x "+c.name+" ("+c.type+", "+(c.manaCost||"")+ ")").join("\n");
+        if (!allCards) { setBuildResult("Aggiungi prima delle carte alla collezione."); setBuilding(false); return; }
+
+        const styleDesc = deckStyleDesc.trim() ? "\nDettagli aggiuntivi: "+deckStyleDesc : "";
+        const prompt = "Sei un esperto costruttore di mazzi Magic: The Gathering.\n\n"+
+          "CARTE DISPONIBILI IN COLLEZIONE:\n"+allCards+"\n\n"+
+          "FORMATO: "+buildFormat+"\n"+
+          "STILE DI GIOCO RICHIESTO: "+deckStyle+styleDesc+"\n\n"+
+          "Costruisci il miglior mazzo possibile usando SOLO le carte elencate sopra.\n\n"+
+          "Rispondi in italiano con:\n"+
+          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa)\n\n"+
+          "**Strategia del mazzo**\n(come funziona, win condition, piano di gioco)\n\n"+
+          "**Carte chiave**\n(le 3-5 carte più importanti e perché)\n\n"+
+          "**Carte escluse dalla collezione**\n(max 3 carte che mancano e migliorerebbero il mazzo, con prezzo stimato)\n\n"+
+          "Rispetta le regole del formato "+buildFormat+" (numero carte, ban list, ecc.).";
+
+        try {
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content:prompt}] })
+          });
+          const d = await res.json();
+          setBuildResult(d.content?.[0]?.text || "Nessuna risposta.");
+        } catch { setBuildResult("Errore di connessione. Riprova."); }
+        setBuilding(false);
       }
 
       function renderAdvisor(text) {
@@ -470,12 +733,43 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
 
       // ── PROFILE SCREEN ──
       if (!activeProfileId) {
-        return <ProfileScreen data={data} onSelect={setActiveProfileId} onCreate={createProfile} onDelete={deleteProfile} />;
+        return <ProfileScreen data={data} onSelect={setActiveProfileId} onCreate={createProfile} onDelete={handleDeleteProfile} />;
       }
 
       // ── MAIN APP ──
       return (
         <div style={S.app}>
+          {explainCard && (
+            <div style={S.modalOverlay} onClick={()=>{setExplainCard(null);setExplainText(null);}}>
+              <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    {explainCard.image && <img src={explainCard.image} style={{width:40,borderRadius:4}}/>}
+                    <div>
+                      <div style={{fontWeight:700,fontSize:14}}>{explainCard.name}</div>
+                      <div style={{fontSize:11,color:"#94a3b8"}}>{explainCard.type}</div>
+                    </div>
+                  </div>
+                  <button style={S.btnGhost} onClick={()=>{setExplainCard(null);setExplainText(null);}}>✕</button>
+                </div>
+                {explaining && (
+                  <div style={{textAlign:"center",padding:"30px 0",color:"#64748b"}}>
+                    <div style={{fontSize:28,marginBottom:8}}>⏳</div>
+                    <div>Analisi in corso…</div>
+                  </div>
+                )}
+                {explainText && (
+                  <div style={{marginTop:4}}>
+                    {explainText.split("
+").map((line,i)=>{
+                      if(line.startsWith("**")&&line.endsWith("**")) return <div key={i} style={S.aH2}>{line.replace(/\*\*/g,"")}</div>;
+                      return line.trim() ? <p key={i} style={S.aP}>{line}</p> : <br key={i}/>;
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           {showScan && !confirmCard && (
             <ScanModal onClose={() => setShowScan(false)} onFound={c => { setConfirmCard(c); setShowScan(false); }} />
           )}
@@ -518,7 +812,7 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
 
                 <button style={{...S.btnP, width:"100%", padding:14, fontSize:15}}
                   onClick={() => setShowScan(true)}>
-                  📷 Scansiona o aggiungi carta
+                  🔍 Aggiungi carta
                 </button>
 
                 <div style={{display:"flex", gap:10}}>
@@ -545,8 +839,13 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
                       }
                       <div style={S.tileBody}>
                         <div style={S.tileName}>{card.name}</div>
-                        <div style={S.tileMeta}>{card.condition} · ×{card.qty}</div>
-                        <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
+                        <div style={S.tileMeta}>{card.condition}</div>
+                        <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:6}}>€{cardPrice(card).toFixed(2)}</div>
+                        <div style={S.qtyRow} onClick={e=>e.stopPropagation()}>
+                          <button style={S.qtyBtn} onClick={()=>updateQty(card.id,-1)}>−</button>
+                          <span style={S.qtyCnt}>{card.qty}</span>
+                          <button style={S.qtyBtn} onClick={()=>updateQty(card.id,+1)}>+</button>
+                        </div>
                       </div>
                       {selectedCard?.id===card.id && (
                         <div style={S.detail} onClick={e=>e.stopPropagation()}>
@@ -563,6 +862,7 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
                               </div>
                             ))}
                           </div>
+                          <button style={S.btnExplain} onClick={e=>{e.stopPropagation();explainCardFn(card);}}>💬 Spiega questa carta</button>
                           <button style={S.btnDel} onClick={()=>removeCard(card.id)}>🗑 Rimuovi</button>
                         </div>
                       )}
@@ -603,7 +903,7 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
                               </div>
                               <div style={{display:"flex",gap:6}}>
                                 <button style={S.btnSm} onClick={()=>{setActiveDeck(deck.id);setDeckView("build");}}>✏️</button>
-                                <button style={{...S.btnSm,background:"#7f1d1d"}} onClick={()=>deleteDeck(deck.id)}>🗑</button>
+                                <button style={{...S.btnSm,background:"#7f1d1d"}} onClick={()=>handleDeleteDeck(deck.id)}>🗑</button>
                               </div>
                             </div>
                           </div>
@@ -665,35 +965,99 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
             {/* ── ADVISOR ── */}
             {tab==="advisor" && (
               <div style={S.col} className="fade-in">
-                <div style={{textAlign:"center",padding:"24px 0 8px"}}>
-                  <div style={{fontSize:52,marginBottom:8}}>🤖</div>
-                  <div style={{fontSize:22,fontWeight:800}}>AI Deck Advisor</div>
-                  <div style={{color:"#64748b",marginTop:4,fontSize:13}}>Analisi del mazzo + suggerimenti di acquisto</div>
+                <div style={{textAlign:"center",padding:"20px 0 8px"}}>
+                  <div style={{fontSize:44,marginBottom:6}}>🤖</div>
+                  <div style={{fontSize:22,fontWeight:800}}>AI Advisor</div>
                 </div>
-                <div style={S.panel}>
-                  <label style={S.lbl}>Mazzo da analizzare</label>
-                  <select style={{...S.sel,width:"100%",marginBottom:16}} value={advisorDeck} onChange={e=>setAdvisorDeck(e.target.value)}>
-                    <option value="">— Seleziona un mazzo —</option>
-                    {data.decks.map(d=><option key={d.id} value={d.id}>{d.name} ({d.format})</option>)}
-                  </select>
-                  <label style={S.lbl}>Budget massimo: <b style={{color:"#f59e0b"}}>€{budget}</b></label>
-                  <input type="range" min="5" max="500" step="5" value={budget}
-                    onChange={e=>setBudget(parseInt(e.target.value))}
-                    style={{width:"100%",accentColor:"#f59e0b",margin:"6px 0 4px"}} />
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#64748b",marginBottom:16}}>
-                    <span>€5</span><span>€100</span><span>€250</span><span>€500</span>
-                  </div>
-                  {data.decks.length===0 && <div style={{...S.empty,padding:"12px 0",marginBottom:12}}>Prima crea un mazzo nella sezione ⚔️ Mazzi</div>}
-                  <button style={{...S.btnP,width:"100%",padding:13,fontSize:15}}
-                    onClick={runAdvisor} disabled={!advisorDeck||advising}>
-                    {advising?"⏳ Analisi in corso…":"🔮 Analizza e consiglia"}
-                  </button>
+
+                {/* Mode selector */}
+                <div style={{display:"flex",gap:8,background:"#12101a",borderRadius:10,padding:6,border:"1px solid #1e1b2e"}}>
+                  {[["analyze","🔮 Analizza mazzo"],["build","⚡ Crea mazzo"]].map(([m,l])=>(
+                    <button key={m} onClick={()=>{setAdvisorMode(m);setAdvisorResult(null);setBuildResult(null);}}
+                      style={{flex:1,padding:"9px 0",borderRadius:7,border:"none",cursor:"pointer",fontWeight:600,fontSize:13,
+                        background:advisorMode===m?"#f59e0b":"transparent",color:advisorMode===m?"#0a0a0f":"#64748b"}}>
+                      {l}
+                    </button>
+                  ))}
                 </div>
-                {advisorResult && (
-                  <div style={{...S.panel,borderColor:"#1a3a2a"}} className="fade-in">
-                    <div style={{fontSize:13,fontWeight:700,color:"#34d399",marginBottom:14}}>📋 Analisi completata</div>
-                    {renderAdvisor(advisorResult)}
-                  </div>
+
+                {/* ANALYZE MODE */}
+                {advisorMode==="analyze" && (
+                  <>
+                    <div style={S.panel}>
+                      <div style={S.pt}>Analizza e migliora un mazzo esistente</div>
+                      <label style={S.lbl}>Mazzo da analizzare</label>
+                      <select style={{...S.sel,width:"100%",marginBottom:16}} value={advisorDeck} onChange={e=>setAdvisorDeck(e.target.value)}>
+                        <option value="">— Seleziona un mazzo —</option>
+                        {data.decks.map(d=><option key={d.id} value={d.id}>{d.name} ({d.format})</option>)}
+                      </select>
+                      <label style={S.lbl}>Budget acquisti: <b style={{color:"#f59e0b"}}>€{budget}</b></label>
+                      <input type="range" min="5" max="500" step="5" value={budget}
+                        onChange={e=>setBudget(parseInt(e.target.value))}
+                        style={{width:"100%",accentColor:"#f59e0b",margin:"6px 0 4px"}} />
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#64748b",marginBottom:16}}>
+                        <span>€5</span><span>€100</span><span>€250</span><span>€500</span>
+                      </div>
+                      {data.decks.length===0 && <div style={{...S.empty,padding:"12px 0",marginBottom:12}}>Prima crea un mazzo nella sezione ⚔️ Mazzi</div>}
+                      <button style={{...S.btnP,width:"100%",padding:13,fontSize:15}}
+                        onClick={runAdvisor} disabled={!advisorDeck||advising}>
+                        {advising?"⏳ Analisi in corso…":"🔮 Analizza e consiglia"}
+                      </button>
+                    </div>
+                    {advisorResult && (
+                      <div style={{...S.panel,borderColor:"#1a3a2a"}} className="fade-in">
+                        <div style={{fontSize:13,fontWeight:700,color:"#34d399",marginBottom:14}}>📋 Analisi completata</div>
+                        {renderAdvisor(advisorResult)}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* BUILD MODE */}
+                {advisorMode==="build" && (
+                  <>
+                    <div style={S.panel}>
+                      <div style={S.pt}>Crea un mazzo dalle tue carte</div>
+                      <label style={S.lbl}>Formato</label>
+                      <select style={{...S.sel,width:"100%",marginBottom:14}} value={buildFormat} onChange={e=>setBuildFormat(e.target.value)}>
+                        {FORMATS.map(f=><option key={f}>{f}</option>)}
+                      </select>
+
+                      <label style={S.lbl}>Stile di gioco</label>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+                        {[["aggressivo","⚔️ Aggressivo"],["controllo","🛡️ Controllo"],["combo","💥 Combo"],["midrange","⚖️ Midrange"],["rampa","🌿 Rampa"],["personalizzato","✏️ Personalizzato"]].map(([v,l])=>(
+                          <button key={v} onClick={()=>setDeckStyle(v)}
+                            style={{padding:"8px 4px",borderRadius:7,border:`1px solid ${deckStyle===v?"#f59e0b":"#2d2b3e"}`,
+                              background:deckStyle===v?"#1e1b2e":"transparent",color:deckStyle===v?"#f59e0b":"#94a3b8",
+                              cursor:"pointer",fontSize:12,fontWeight:deckStyle===v?700:400}}>
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+
+                      {deckStyle==="personalizzato" && (
+                        <textarea style={{...S.inp,width:"100%",minHeight:70,resize:"vertical",marginBottom:14}}
+                          placeholder="Descrivi il tuo stile di mazzo ideale… (es. voglio un mazzo con molti zombi che sfrutta il cimitero)"
+                          value={deckStyleDesc} onChange={e=>setDeckStyleDesc(e.target.value)} />
+                      )}
+
+                      <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>
+                        Carte disponibili: <b style={{color:"#f8fafc"}}>{collection.length} titoli</b> · {collection.reduce((s,c)=>s+c.qty,0)} totali
+                      </div>
+
+                      {collection.length===0 && <div style={{...S.empty,padding:"12px 0",marginBottom:12}}>Aggiungi carte alla collezione prima</div>}
+                      <button style={{...S.btnP,width:"100%",padding:13,fontSize:15}}
+                        onClick={buildDeckFromCollection} disabled={collection.length===0||building}>
+                        {building?"⏳ Costruzione mazzo in corso…":"⚡ Costruisci mazzo"}
+                      </button>
+                    </div>
+                    {buildResult && (
+                      <div style={{...S.panel,borderColor:"#1a3a2a"}} className="fade-in">
+                        <div style={{fontSize:13,fontWeight:700,color:"#34d399",marginBottom:14}}>⚡ Mazzo costruito</div>
+                        {renderAdvisor(buildResult)}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}
@@ -750,7 +1114,8 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
       // Buttons
       btnP:{padding:"8px 18px",background:"#f59e0b",color:"#0a0a0f",border:"none",borderRadius:7,fontWeight:700,cursor:"pointer",fontSize:13,whiteSpace:"nowrap"},
       btnGhost:{padding:"6px 14px",background:"transparent",border:"1px solid #2d2b3e",color:"#94a3b8",borderRadius:6,cursor:"pointer",fontSize:12},
-      btnDel:{marginTop:10,padding:"6px 14px",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,cursor:"pointer",fontSize:12},
+      btnExplain:{display:"block",width:"100%",marginTop:8,padding:"7px",background:"#1e3a5f",color:"#93c5fd",border:"1px solid #1d4ed8",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
+      btnDel:{marginTop:6,padding:"6px 14px",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,cursor:"pointer",fontSize:12},
       btnSm:{padding:"5px 10px",background:"#1e1b2e",border:"none",borderRadius:5,color:"#f8fafc",cursor:"pointer",fontSize:12},
       btnMini:{padding:"2px 8px",background:"#1e1b2e",border:"1px solid #2d2b3e",borderRadius:4,color:"#94a3b8",cursor:"pointer",fontSize:12},
       btnAdd:{padding:"8px 16px",background:"#1d4ed8",color:"#fff",border:"none",borderRadius:7,fontWeight:600,cursor:"pointer",fontSize:13},
@@ -777,10 +1142,17 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
       modalBox:{background:"#12101a",border:"1px solid #2d2b3e",borderRadius:14,padding:20,width:"100%",maxWidth:420},
       modalHeader:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14},
       divider:{textAlign:"center",position:"relative",margin:"4px 0",color:"#4a4570",fontSize:12},
+      // Autocomplete
+      suggBox:{position:"absolute",top:"100%",left:0,right:40,background:"#1a1828",border:"1px solid #4a4570",borderRadius:8,zIndex:300,boxShadow:"0 8px 24px rgba(0,0,0,.7)",marginTop:4,overflow:"hidden"},
+      suggItem:{padding:"10px 14px",fontSize:13,cursor:"pointer",borderBottom:"1px solid #1e1b2e",color:"#e2e8f0"},
       // Search results
       resultRow:{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:"#0e0c16",borderRadius:8,cursor:"pointer",border:"1px solid #1e1b2e"},
       resultImg:{width:44,height:62,objectFit:"cover",borderRadius:5,flexShrink:0},
       resultImgPlaceholder:{width:44,height:62,background:"#1e1b2e",borderRadius:5,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0},
+      // Quantity controls
+      qtyRow:{display:"flex",alignItems:"center",gap:6},
+      qtyBtn:{width:24,height:24,background:"#1e1b2e",border:"1px solid #2d2b3e",borderRadius:5,color:"#f8fafc",cursor:"pointer",fontSize:14,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center"},
+      qtyCnt:{fontSize:13,fontWeight:700,minWidth:20,textAlign:"center"},
       // Advisor
       aH2:{fontSize:13,fontWeight:700,color:"#f59e0b",margin:"12px 0 5px"},
       aLi:{fontSize:12,color:"#cbd5e1",padding:"3px 0 3px 10px",borderLeft:"2px solid #1e3a2e",margin:"3px 0"},
