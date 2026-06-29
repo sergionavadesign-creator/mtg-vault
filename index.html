@@ -52,14 +52,37 @@
       } catch { return null; }
     }
 
+    // Detect likely language from query (basic heuristic)
+    function detectLang(q) {
+      const itWords = ["isola","foresta","montagna","palude","pianura","fulmine","creatura","magia","artefatto","incantesimo","terra","bianco","nero","rosso","verde","blu","leggendario","istantaneo","magia","stregoneria"];
+      const lower = q.toLowerCase();
+      if (itWords.some(w => lower===w || lower.startsWith(w+" "))) return "it";
+      return "en";
+    }
+
     async function searchCardMulti(query) {
       try {
-        // Prima prova ricerca full-text per nome
-        const r = await fetch(`https://api.scryfall.com/cards/search?q=name%3A${encodeURIComponent('"'+query+'"')}&order=name&limit=20`);
-        if (r.ok) { const d = await r.json(); if (d.data?.length) return d.data; }
-        // Fallback: ricerca generica
-        const r2 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=name&limit=20`);
-        if (r2.ok) { const d2 = await r2.json(); return d2.data || []; }
+        const q = query.trim();
+        const lang = detectLang(q);
+        const results = [];
+
+        if (lang === "it") {
+          // Cerca nome ESATTO in italiano
+          const r1 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'" lang:it')}&unique=prints&order=released&limit=30`);
+          if (r1.ok) { const d = await r1.json(); if (d.data?.length) return d.data; }
+          // Fallback: nome parziale in italiano
+          const r2 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'" lang:it')}&unique=prints&order=released&limit=30`);
+          if (r2.ok) { const d = await r2.json(); if (d.data?.length) return d.data; }
+        }
+
+        // Cerca nome esatto in inglese
+        const r3 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'"')}&unique=prints&order=released&limit=30`);
+        if (r3.ok) { const d = await r3.json(); if (d.data?.length) return d.data; }
+
+        // Fallback: nome parziale inglese
+        const r4 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'"')}&unique=prints&order=released&limit=30`);
+        if (r4.ok) { const d = await r4.json(); if (d.data?.length) return d.data; }
+
         return [];
       } catch { return []; }
     }
@@ -147,6 +170,37 @@
       const [status, setStatus] = useState("Inquadra la carta MTG");
       const [manualName, setManualName] = useState("");
       const [results, setResults] = useState([]); // lista risultati multipli
+      const [suggestions, setSuggestions] = useState([]); // autocomplete
+      const [showSugg, setShowSugg] = useState(false);
+      const debounceRef = useRef(null);
+
+      // Autocomplete: cerca su Scryfall catalog mentre si digita
+      function handleTypeahead(val) {
+        setManualName(val);
+        setSuggestions([]);
+        setShowSugg(false);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        if (val.trim().length < 2) return;
+        debounceRef.current = setTimeout(async () => {
+          try {
+            // Scryfall autocomplete endpoint — restituisce nomi di carte
+            const r = await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(val)}&include_extras=false`);
+            if (r.ok) {
+              const d = await r.json();
+              setSuggestions(d.data?.slice(0, 8) || []);
+              setShowSugg(true);
+            }
+          } catch {}
+        }, 280);
+      }
+
+      function pickSuggestion(name) {
+        setManualName(name);
+        setSuggestions([]);
+        setShowSugg(false);
+        // Avvia ricerca automaticamente
+        setTimeout(() => doManualSearch(name), 50);
+      }
 
       useEffect(() => {
         navigator.mediaDevices?.getUserMedia({ video: { facingMode:"environment" } })
@@ -177,23 +231,33 @@
           const name = d.content?.[0]?.text?.trim();
           if (!name || name==="UNKNOWN") { setStatus("Carta non riconosciuta — cerca manualmente"); setScanning(false); return; }
           setManualName(name);
-          setStatus(`Identificata: "${name}" — cercando varianti…`);
-          const cards = await searchCardMulti(name);
-          if (cards.length) { setResults(cards); setStatus(`${cards.length} varianti trovate — scegli quella che hai:`); }
-          else { setStatus("Carta non trovata su Scryfall — prova ricerca manuale"); }
-        } catch { setStatus("Errore — usa ricerca manuale"); }
+          setStatus(`Identificata: "${name}" — cercando tutte le edizioni…`);
+          // Search exact English name + Italian prints
+          const [enCards, itCards] = await Promise.all([
+            searchCardMulti(name),
+            fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+name+'" lang:it')}&unique=prints&order=released&limit=30`).then(r=>r.ok?r.json().then(d=>d.data||[]):[]).catch(()=>[])
+          ]);
+          const allCards = [...itCards, ...enCards.filter(e => !itCards.find(i => i.set===e.set && i.collector_number===e.collector_number))];
+          if (allCards.length) { setResults(allCards); setStatus(`${allCards.length} edizioni trovate — scegli quella che hai:`); }
+          else { setStatus("Carta non trovata — prova ricerca manuale"); }
+        } catch(e) { 
+          console.error(e);
+          setStatus("Fotocamera: usa la ricerca manuale per nome"); 
+        }
         setScanning(false);
       }
 
-      async function manualSearch() {
-        if (!manualName.trim()) return;
-        setScanning(true); setResults([]); setStatus("Cercando…");
-        const cards = await searchCardMulti(manualName.trim());
+      async function doManualSearch(name) {
+        const q = (name || manualName).trim();
+        if (!q) return;
+        setScanning(true); setResults([]); setShowSugg(false); setStatus("Cercando…");
+        const cards = await searchCardMulti(q);
         if (cards.length===1) { stream?.getTracks().forEach(t => t.stop()); onFound(cards[0]); }
-        else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} risultati — seleziona la carta:`); }
+        else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} edizioni trovate — scegli quella che hai:`); }
         else { setStatus("Nessuna carta trovata. Controlla il nome."); }
         setScanning(false);
       }
+      const manualSearch = () => doManualSearch(manualName);
 
       function pickCard(card) {
         stream?.getTracks().forEach(t => t.stop());
@@ -222,15 +286,28 @@
               </>
             )}
 
-            {/* Search bar sempre visibile */}
-            <div style={{display:"flex", gap:8, marginTop:results.length?0:12}}>
-              <input style={{...S.inp, flex:1}}
-                placeholder="Nome carta (es. Isola, Lightning Bolt…)"
-                value={manualName}
-                onChange={e => { setManualName(e.target.value); setResults([]); setStatus(""); }}
-                onKeyDown={e => e.key==="Enter" && manualSearch()}
-                autoFocus={results.length===0} />
-              <button style={S.btnP} onClick={manualSearch} disabled={scanning}>🔍</button>
+            {/* Search bar con autocomplete */}
+            <div style={{position:"relative", marginTop:results.length?0:12}}>
+              <div style={{display:"flex", gap:8}}>
+                <input style={{...S.inp, flex:1}}
+                  placeholder="Scrivi il nome (es. Isola, Lightning…)"
+                  value={manualName}
+                  onChange={e => { handleTypeahead(e.target.value); setResults([]); setStatus(""); }}
+                  onKeyDown={e => { if(e.key==="Enter"){ e.preventDefault(); manualSearch(); } if(e.key==="Escape") setShowSugg(false); }}
+                  onBlur={() => setTimeout(()=>setShowSugg(false), 150)}
+                  onFocus={() => suggestions.length>0 && setShowSugg(true)}
+                  autoFocus={results.length===0} />
+                <button style={S.btnP} onClick={manualSearch} disabled={scanning}>🔍</button>
+              </div>
+              {showSugg && suggestions.length>0 && (
+                <div style={S.suggBox}>
+                  {suggestions.map((name,i) => (
+                    <div key={i} style={S.suggItem} onMouseDown={()=>pickSuggestion(name)}>
+                      🃏 {name}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Status quando ci sono risultati */}
@@ -241,23 +318,31 @@
             {/* Lista risultati */}
             {results.length>0 && (
               <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}}>
-                {results.map(card => (
-                  <div key={card.id} style={S.resultRow} onClick={() => pickCard(card)}>
-                    {cardImage(card)
-                      ? <img src={cardImage(card)} alt={card.name} style={S.resultImg}/>
-                      : <div style={S.resultImgPlaceholder}>🃏</div>
-                    }
-                    <div style={{flex:1, minWidth:0}}>
-                      <div style={{fontWeight:700, fontSize:13}}>{card.name}</div>
-                      <div style={{fontSize:11, color:"#94a3b8", marginTop:2}}>{card.set_name} · #{card.collector_number}</div>
-                      <div style={{fontSize:11, color:"#64748b"}}>{card.type_line}</div>
+                {results.map(card => {
+                  const year = card.released_at ? card.released_at.slice(0,4) : "";
+                  const langFlag = {en:"🇬🇧",it:"🇮🇹",fr:"🇫🇷",de:"🇩🇪",es:"🇪🇸",pt:"🇵🇹",ja:"🇯🇵",ko:"🇰🇷",ru:"🇷🇺",zhs:"🇨🇳",zht:"🇨🇳"}[card.lang] || card.lang?.toUpperCase() || "";
+                  return (
+                    <div key={card.id} style={S.resultRow} onClick={() => pickCard(card)}>
+                      {cardImage(card)
+                        ? <img src={cardImage(card)} alt={card.name} style={S.resultImg}/>
+                        : <div style={S.resultImgPlaceholder}>🃏</div>
+                      }
+                      <div style={{flex:1, minWidth:0}}>
+                        <div style={{fontWeight:700, fontSize:13}}>{card.name}</div>
+                        <div style={{fontSize:11, color:"#94a3b8", marginTop:2}}>{card.set_name}</div>
+                        <div style={{display:"flex", gap:8, marginTop:3, alignItems:"center"}}>
+                          <span style={{fontSize:10, color:"#64748b"}}>{year}</span>
+                          <span style={{fontSize:11}}>{langFlag}</span>
+                          <span style={{fontSize:10, color:"#64748b", textTransform:"uppercase"}}>{card.rarity}</span>
+                        </div>
+                      </div>
+                      <div style={{textAlign:"right", flexShrink:0}}>
+                        <div style={{fontSize:14, fontWeight:700, color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
+                        <div style={{fontSize:10, color:"#4e9af1", marginTop:3}}>#{card.collector_number}</div>
+                      </div>
                     </div>
-                    <div style={{textAlign:"right", flexShrink:0}}>
-                      <div style={{fontSize:14, fontWeight:700, color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
-                      <div style={{fontSize:10, color:"#64748b", textTransform:"uppercase", marginTop:2}}>{card.rarity}</div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
@@ -378,6 +463,18 @@
           p.id===activeProfileId ? { ...p, cards: (p.cards||[]).filter(c => c.id!==id) } : p
         )};
         persist(u); setSelectedCard(null);
+      }
+
+      function updateQty(id, delta) {
+        const u = { ...data, profiles: data.profiles.map(p => {
+          if (p.id!==activeProfileId) return p;
+          return { ...p, cards: (p.cards||[]).map(c => {
+            if (c.id!==id) return c;
+            const newQty = (c.qty||1) + delta;
+            return newQty < 1 ? null : { ...c, qty: newQty };
+          }).filter(Boolean) };
+        })};
+        persist(u);
       }
 
       const filteredCollection = collection.filter(c => {
@@ -545,8 +642,13 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
                       }
                       <div style={S.tileBody}>
                         <div style={S.tileName}>{card.name}</div>
-                        <div style={S.tileMeta}>{card.condition} · ×{card.qty}</div>
-                        <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
+                        <div style={S.tileMeta}>{card.condition}</div>
+                        <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:6}}>€{cardPrice(card).toFixed(2)}</div>
+                        <div style={S.qtyRow} onClick={e=>e.stopPropagation()}>
+                          <button style={S.qtyBtn} onClick={()=>updateQty(card.id,-1)}>−</button>
+                          <span style={S.qtyCnt}>{card.qty}</span>
+                          <button style={S.qtyBtn} onClick={()=>updateQty(card.id,+1)}>+</button>
+                        </div>
                       </div>
                       {selectedCard?.id===card.id && (
                         <div style={S.detail} onClick={e=>e.stopPropagation()}>
@@ -777,10 +879,17 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
       modalBox:{background:"#12101a",border:"1px solid #2d2b3e",borderRadius:14,padding:20,width:"100%",maxWidth:420},
       modalHeader:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14},
       divider:{textAlign:"center",position:"relative",margin:"4px 0",color:"#4a4570",fontSize:12},
+      // Autocomplete
+      suggBox:{position:"absolute",top:"100%",left:0,right:40,background:"#1a1828",border:"1px solid #4a4570",borderRadius:8,zIndex:300,boxShadow:"0 8px 24px rgba(0,0,0,.7)",marginTop:4,overflow:"hidden"},
+      suggItem:{padding:"10px 14px",fontSize:13,cursor:"pointer",borderBottom:"1px solid #1e1b2e",color:"#e2e8f0"},
       // Search results
       resultRow:{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",background:"#0e0c16",borderRadius:8,cursor:"pointer",border:"1px solid #1e1b2e"},
       resultImg:{width:44,height:62,objectFit:"cover",borderRadius:5,flexShrink:0},
       resultImgPlaceholder:{width:44,height:62,background:"#1e1b2e",borderRadius:5,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0},
+      // Quantity controls
+      qtyRow:{display:"flex",alignItems:"center",gap:6},
+      qtyBtn:{width:24,height:24,background:"#1e1b2e",border:"1px solid #2d2b3e",borderRadius:5,color:"#f8fafc",cursor:"pointer",fontSize:14,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center"},
+      qtyCnt:{fontSize:13,fontWeight:700,minWidth:20,textAlign:"center"},
       // Advisor
       aH2:{fontSize:13,fontWeight:700,color:"#f59e0b",margin:"12px 0 5px"},
       aLi:{fontSize:12,color:"#cbd5e1",padding:"3px 0 3px 10px",borderLeft:"2px solid #1e3a2e",margin:"3px 0"},
