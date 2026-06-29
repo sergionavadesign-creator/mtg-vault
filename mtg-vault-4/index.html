@@ -760,8 +760,7 @@
                 )}
                 {explainText && (
                   <div style={{marginTop:4}}>
-                    {explainText.split("
-").map((line,i)=>{
+                    {explainText.split("\n").map((line,i)=>{
                       if(line.startsWith("**")&&line.endsWith("**")) return <div key={i} style={S.aH2}>{line.replace(/\*\*/g,"")}</div>;
                       return line.trim() ? <p key={i} style={S.aP}>{line}</p> : <br key={i}/>;
                     })}
