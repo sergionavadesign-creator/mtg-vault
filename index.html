@@ -642,27 +642,15 @@
         const deck = data.decks.find(d => d.id===parseInt(advisorDeck)); if (!deck) return;
         setAdvising(true); setAdvisorResult(null);
         const summary = deck.cards.map(c => `${c.qty||1}x ${c.name} (${c.type}, ${c.manaCost})`).join("\n");
-        const prompt = `Sei un esperto di Magic: The Gathering. Analizza questo mazzo in formato ${deck.format} e suggerisci miglioramenti concreti.
-
-MAZZO ATTUALE:
-${summary || "(mazzo vuoto — suggerisci una strategia di base)"}
-
-BUDGET MASSIMO: €${budget}
-
-Rispondi in italiano con queste sezioni:
-**Analisi del mazzo**
-(punti di forza e debolezze)
-
-**Carte da rimuovere**
-- Nome carta — motivazione
-
-**Carte da aggiungere**
-- Nome carta — €X stimato — https://www.cardmarket.com/it/Magic/Products/Singles?searchString=NomeCarta
-
-**Strategia consigliata**
-(2-3 righe)
-
-Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
+        const prompt = "Sei un esperto di Magic: The Gathering. Analizza questo mazzo in formato "+deck.format+" e suggerisci miglioramenti concreti.\n\n"+
+          "MAZZO ATTUALE:\n"+(summary||"(mazzo vuoto)")+"\n\n"+
+          "BUDGET MASSIMO: €"+budget+"\n\n"+
+          "Rispondi in italiano con:\n"+
+          "**Analisi del mazzo**\n(punti di forza e debolezze)\n\n"+
+          "**Carte da rimuovere**\n- Nome carta — motivazione\n\n"+
+          "**Carte da aggiungere**\n- Nome carta — €X stimato — link Cardmarket\n\n"+
+          "**Strategia consigliata**\n(2-3 righe)\n\n"+
+          "Budget rigoroso: €"+budget+". Solo carte legali in "+deck.format+".";
 
         try {
           const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -680,22 +668,14 @@ Budget rigoroso: €${budget}. Solo carte legali in ${deck.format}.`;
         setExplainCard(card);
         setExplainText(null);
         setExplaining(true);
-        const prompt = `Sei un esperto di Magic: The Gathering. Spiega in italiano questa carta in modo chiaro e utile per un giocatore:
-
-Nome: ${card.name}
-Tipo: ${card.type}
-Costo di mana: ${card.manaCost || "N/A"}
-Testo: [cerca le regole ufficiali di questa carta]
-Set: ${card.set}
-Rarità: ${card.rarity}
-
-Spiega in italiano:
-1. **Cosa fa** (spiegazione semplice dell'effetto)
-2. **Come si usa** (quando e perché giocarla)
-3. **Sinergie** (con quali altri tipi di carte funziona bene)
-4. **Punti di forza e debolezza**
-
-Sii conciso ma completo. Usa un linguaggio accessibile anche per chi non è esperto.`;
+        const prompt = "Sei un esperto di Magic: The Gathering. Spiega in italiano questa carta:\n\n"+
+          "Nome: "+card.name+"\nTipo: "+card.type+"\nCosto mana: "+(card.manaCost||"N/A")+"\nSet: "+card.set+"\nRarità: "+card.rarity+"\n\n"+
+          "Spiega in italiano:\n"+
+          "1. **Cosa fa** (spiegazione semplice dell'effetto)\n"+
+          "2. **Come si usa** (quando e perché giocarla)\n"+
+          "3. **Sinergie** (con quali altri tipi di carte funziona bene)\n"+
+          "4. **Punti di forza e debolezza**\n\n"+
+          "Sii conciso ma completo. Linguaggio accessibile anche per chi non è esperto.";
 
         try {
           const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -711,36 +691,21 @@ Sii conciso ma completo. Usa un linguaggio accessibile anche per chi non è espe
       // Costruisce mazzo dalle carte in collezione
       async function buildDeckFromCollection() {
         setBuilding(true); setBuildResult(null);
-        const allCards = collection.map(c => `${c.qty}x ${c.name} (${c.type}, ${c.manaCost||""})`).join("
-");
+        const allCards = collection.map(c => c.qty+"x "+c.name+" ("+c.type+", "+(c.manaCost||"")+ ")").join("\n");
         if (!allCards) { setBuildResult("Aggiungi prima delle carte alla collezione."); setBuilding(false); return; }
 
-        const styleDesc = deckStyleDesc.trim() ? `
-Dettagli aggiuntivi: ${deckStyleDesc}` : "";
-        const prompt = `Sei un esperto costruttore di mazzi Magic: The Gathering.
-
-CARTE DISPONIBILI IN COLLEZIONE:
-${allCards}
-
-FORMATO: ${buildFormat}
-STILE DI GIOCO RICHIESTO: ${deckStyle}${styleDesc}
-
-Costruisci il miglior mazzo possibile usando SOLO le carte elencate sopra.
-
-Rispondi in italiano con:
-**Lista mazzo**
-(formato: Nx Nome Carta — per ogni carta inclusa)
-
-**Strategia del mazzo**
-(3-4 righe: come funziona, win condition, piano di gioco)
-
-**Carte chiave**
-(le 3-5 carte più importanti e perché)
-
-**Carte escluse dalla collezione**
-(max 3 carte che mancano e migliorerebbero il mazzo, con prezzo stimato)
-
-Rispetta le regole del formato ${buildFormat} (numero carte, ban list, ecc.).`;
+        const styleDesc = deckStyleDesc.trim() ? "\nDettagli aggiuntivi: "+deckStyleDesc : "";
+        const prompt = "Sei un esperto costruttore di mazzi Magic: The Gathering.\n\n"+
+          "CARTE DISPONIBILI IN COLLEZIONE:\n"+allCards+"\n\n"+
+          "FORMATO: "+buildFormat+"\n"+
+          "STILE DI GIOCO RICHIESTO: "+deckStyle+styleDesc+"\n\n"+
+          "Costruisci il miglior mazzo possibile usando SOLO le carte elencate sopra.\n\n"+
+          "Rispondi in italiano con:\n"+
+          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa)\n\n"+
+          "**Strategia del mazzo**\n(come funziona, win condition, piano di gioco)\n\n"+
+          "**Carte chiave**\n(le 3-5 carte più importanti e perché)\n\n"+
+          "**Carte escluse dalla collezione**\n(max 3 carte che mancano e migliorerebbero il mazzo, con prezzo stimato)\n\n"+
+          "Rispetta le regole del formato "+buildFormat+" (numero carte, ban list, ecc.).";
 
         try {
           const res = await fetch("https://api.anthropic.com/v1/messages", {
