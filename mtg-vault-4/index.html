@@ -134,39 +134,35 @@
       } catch { return null; }
     }
 
-    // Detect likely language from query (basic heuristic)
-    function detectLang(q) {
-      const itWords = ["isola","foresta","montagna","palude","pianura","fulmine","creatura","magia","artefatto","incantesimo","terra","bianco","nero","rosso","verde","blu","leggendario","istantaneo","magia","stregoneria"];
-      const lower = q.toLowerCase();
-      if (itWords.some(w => lower===w || lower.startsWith(w+" "))) return "it";
-      return "en";
-    }
-
+    // Cerca carte: prima trova nome inglese via fuzzy, poi prende stampe in tutte le lingue
     async function searchCardMulti(query) {
       try {
         const q = query.trim();
-        const lang = detectLang(q);
+        if (!q) return [];
 
-        if (lang === "it") {
-          // 1. Nome esatto italiano (printed_name)
-          const r1 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'" lang:it')}&unique=prints&order=released&limit=30`);
-          if (r1.ok) { const d = await r1.json(); if (d.data?.length) return d.data; }
-          // 2. Nome parziale italiano
-          const r2 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'" lang:it')}&unique=prints&order=released&limit=30`);
-          if (r2.ok) { const d = await r2.json(); if (d.data?.length) return d.data; }
-        }
+        // Step 1: trova il nome inglese Oracle con fuzzy search (funziona con input italiano/inglese)
+        const fuzzy = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(q)}`)
+          .then(r => r.ok ? r.json() : null).catch(() => null);
 
-        // 3. Nome esatto inglese
-        const r3 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'"')}&unique=prints&order=released&limit=30`);
-        if (r3.ok) { const d = await r3.json(); if (d.data?.length) return d.data; }
+        // Step 2: cerca per nome esatto inglese per avere tutte le stampe
+        const searchQuery = fuzzy ? `!"${fuzzy.name}" lang:any` : `"${q}" lang:any`;
+        const prints = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(searchQuery)}&unique=prints&order=released&limit=40`)
+          .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]);
 
-        // 4. Nome parziale inglese
-        const r4 = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'"')}&unique=prints&order=released&limit=30`);
-        if (r4.ok) { const d = await r4.json(); if (d.data?.length) return d.data; }
+        if (prints.length === 0 && !fuzzy) return [];
 
-        return [];
+        // Se fuzzy ha trovato la carta ma non ci sono stampe, usa il fuzzy stesso
+        if (prints.length === 0 && fuzzy) return [fuzzy];
+
+        // Ordina: italiano prima, poi inglese, poi altre lingue
+        const italian = prints.filter(c => c.lang === 'it');
+        const english = prints.filter(c => c.lang === 'en');
+        const others = prints.filter(c => c.lang !== 'it' && c.lang !== 'en');
+
+        return [...italian, ...english, ...others];
       } catch { return []; }
     }
+
     async function searchByCode(setCode, number) {
       try {
         const r = await fetch(`https://api.scryfall.com/cards/${setCode.toLowerCase()}/${number}`);
@@ -242,20 +238,17 @@
       );
     }
 
-    // ── SCAN MODAL ───────────────────────────────────────────
+    // ── SEARCH MODAL ─────────────────────────────────────────
     function ScanModal({ onClose, onFound }) {
-      const videoRef = useRef(null);
-      const canvasRef = useRef(null);
-      const [stream, setStream] = useState(null);
       const [scanning, setScanning] = useState(false);
-      const [status, setStatus] = useState("Inquadra la carta MTG");
+      const [status, setStatus] = useState("");
       const [manualName, setManualName] = useState("");
       const [results, setResults] = useState([]); // lista risultati multipli
       const [suggestions, setSuggestions] = useState([]); // autocomplete
       const [showSugg, setShowSugg] = useState(false);
       const debounceRef = useRef(null);
 
-      // Autocomplete multilingua
+      // Autocomplete: cerca SEMPRE in italiano e inglese insieme
       function handleTypeahead(val) {
         setManualName(val);
         setSuggestions([]);
@@ -264,24 +257,14 @@
         if (val.trim().length < 2) return;
         debounceRef.current = setTimeout(async () => {
           try {
-            const lang = detectLang(val);
-            let names = [];
-            if (lang === "it") {
-              // Cerca nomi italiani
-              const r = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:'+val+' lang:it')}&unique=names&limit=12`);
-              if (r.ok) {
-                const d = await r.json();
-                names = (d.data || []).map(c => c.printed_name || c.name).filter(Boolean);
-              }
-            }
-            // Sempre aggiungi suggerimenti inglesi come fallback
-            const rEn = await fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(val)}&include_extras=false`);
-            if (rEn.ok) {
-              const dEn = await rEn.json();
-              // Merge: italiano prima, poi inglese
-              const enNames = dEn.data || [];
-              names = [...new Set([...names, ...enNames])].slice(0, 8);
-            }
+            const [itRes, enRes] = await Promise.all([
+              fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:'+val+' lang:it')}&unique=names&limit=10`)
+                .then(r => r.ok ? r.json() : { data: [] }).then(d => d.data || []).catch(() => []),
+              fetch(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(val)}&include_extras=false`)
+                .then(r => r.ok ? r.json() : { data: [] }).then(d => d.data || []).catch(() => []),
+            ]);
+            const itNames = itRes.map(c => c.printed_name || c.name).filter(Boolean);
+            const names = [...new Set([...itNames, ...enRes])].slice(0, 8);
             if (names.length) { setSuggestions(names); setShowSugg(true); }
           } catch {}
         }, 280);
@@ -291,56 +274,7 @@
         setManualName(name);
         setSuggestions([]);
         setShowSugg(false);
-        // Avvia ricerca automaticamente
         setTimeout(() => doManualSearch(name), 50);
-      }
-
-      useEffect(() => {
-        navigator.mediaDevices?.getUserMedia({ video: { facingMode:"environment" } })
-          .then(s => { setStream(s); if (videoRef.current) videoRef.current.srcObject = s; })
-          .catch(() => setStatus("Fotocamera non disponibile — usa ricerca manuale"));
-        return () => { stream?.getTracks().forEach(t => t.stop()); };
-      }, []);
-
-      const OCR_SERVER = "https://mtg-ocr-server-1.onrender.com";
-
-      async function capture() {
-        if (!videoRef.current || !canvasRef.current) return;
-        setScanning(true); setResults([]); setStatus("Acquisizione immagine…");
-        const v = videoRef.current; const c = canvasRef.current;
-        c.width = v.videoWidth; c.height = v.videoHeight;
-        c.getContext("2d").drawImage(v, 0, 0);
-
-        try {
-          setStatus("Invio al server OCR…");
-          const blob = await new Promise(res => c.toBlob(res, "image/jpeg", 0.85));
-          const formData = new FormData();
-          formData.append("image", blob, "card.jpg");
-
-          const res = await fetch(`${OCR_SERVER}/recognize`, { method:"POST", body:formData });
-          if (!res.ok) throw new Error(`Server error: ${res.status}`);
-          const { name, confidence } = await res.json();
-
-          if (!name || name.length < 2) {
-            setStatus("Testo non leggibile — inquadra meglio la carta o cerca manualmente");
-            setScanning(false); return;
-          }
-          setManualName(name);
-          setStatus(`Letto: "${name}" (${confidence}%) — cercando edizioni…`);
-
-          const [enCards, itCards] = await Promise.all([
-            searchCardMulti(name),
-            fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+ name +'" lang:it')}&unique=prints&order=released&limit=30`).then(r=>r.ok?r.json().then(d=>d.data||[]):[]).catch(()=>[])
-          ]);
-          const allCards = [...itCards, ...enCards.filter(e => !itCards.find(i => i.set===e.set && i.collector_number===e.collector_number))];
-          if (allCards.length) { setResults(allCards); setStatus(`${allCards.length} edizioni trovate — scegli quella che hai:`); }
-          else { setStatus(`"${name}" non trovata — prova a correggere il nome qui sotto`); }
-
-        } catch(e) {
-          console.error(e);
-          setStatus("Errore connessione server — usa ricerca manuale");
-        }
-        setScanning(false);
       }
 
       async function doManualSearch(name) {
@@ -348,7 +282,7 @@
         if (!q) return;
         setScanning(true); setResults([]); setShowSugg(false); setStatus("Cercando…");
         const cards = await searchCardMulti(q);
-        if (cards.length===1) { stream?.getTracks().forEach(t => t.stop()); onFound(cards[0]); }
+        if (cards.length===1) { onFound(cards[0]); }
         else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} edizioni trovate — scegli quella che hai:`); }
         else { setStatus("Nessuna carta trovata. Controlla il nome."); }
         setScanning(false);
@@ -356,7 +290,6 @@
       const manualSearch = () => doManualSearch(manualName);
 
       function pickCard(card) {
-        stream?.getTracks().forEach(t => t.stop());
         onFound(card);
       }
 
@@ -364,26 +297,12 @@
         <div style={S.modalOverlay} onClick={onClose}>
           <div style={{...S.modalBox, maxHeight:"90vh", overflowY:"auto"}} onClick={e => e.stopPropagation()} className="fade-in">
             <div style={S.modalHeader}>
-              <span style={{fontWeight:700}}>📷 Scansiona o cerca</span>
+              <span style={{fontWeight:700}}>🔍 Cerca carta</span>
               <button style={S.btnGhost} onClick={onClose}>✕</button>
             </div>
 
-            {/* Camera — nascosta se ci sono risultati */}
-            {results.length===0 && (
-              <>
-                <video ref={videoRef} autoPlay playsInline muted
-                  style={{width:"100%", borderRadius:10, background:"#000", maxHeight:200, objectFit:"cover"}} />
-                <canvas ref={canvasRef} style={{display:"none"}} />
-                <div style={{textAlign:"center", fontSize:12, color:"#94a3b8", margin:"8px 0"}}>{status}</div>
-                <button style={{...S.btnP, width:"100%", marginBottom:14}} onClick={capture} disabled={scanning}>
-                  {scanning ? "⏳ Analisi…" : "📸 Scansiona carta"}
-                </button>
-                <div style={S.divider}><span style={{background:"#12101a",padding:"0 10px"}}>oppure cerca per nome</span></div>
-              </>
-            )}
-
             {/* Search bar con autocomplete */}
-            <div style={{position:"relative", marginTop:results.length?0:12}}>
+            <div style={{position:"relative"}}>
               <div style={{display:"flex", gap:8}}>
                 <input style={{...S.inp, flex:1}}
                   placeholder="Scrivi il nome (es. Isola, Lightning…)"
@@ -392,7 +311,7 @@
                   onKeyDown={e => { if(e.key==="Enter"){ e.preventDefault(); manualSearch(); } if(e.key==="Escape") setShowSugg(false); }}
                   onBlur={() => setTimeout(()=>setShowSugg(false), 150)}
                   onFocus={() => suggestions.length>0 && setShowSugg(true)}
-                  autoFocus={results.length===0} />
+                  autoFocus />
                 <button style={S.btnP} onClick={manualSearch} disabled={scanning}>🔍</button>
               </div>
               {showSugg && suggestions.length>0 && (
