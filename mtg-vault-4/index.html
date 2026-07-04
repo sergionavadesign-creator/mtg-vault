@@ -43,6 +43,9 @@
     const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRqem5ocHNlZWNieGl0a2l2a3FmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTg2MzQsImV4cCI6MjA5ODMzNDYzNH0.KzBEzJcGeUx9C7qb5hadsSqbUyMwjdShACCpeXor6h0";
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
+    // Endpoint della Edge Function che fa da proxy sicuro verso l'AI (API key nascosta lato server)
+    const AI_ENDPOINT = SUPABASE_URL + "/functions/v1/ai-proxy";
+
     // Fallback localStorage durante configurazione
     function loadLocalData() {
       try { const r = localStorage.getItem("mtg_vault_v4"); if (r) return JSON.parse(r); } catch {}
@@ -647,8 +650,8 @@
           "Budget rigoroso: €"+budget+". Solo carte legali in "+deck.format+".";
 
         try {
-          const res = await fetch("https://api.anthropic.com/v1/messages", {
-            method:"POST", headers:{"Content-Type":"application/json"},
+          const res = await fetch(AI_ENDPOINT, {
+            method:"POST", headers:{"Content-Type":"application/json", "Authorization":"Bearer "+SUPABASE_KEY},
             body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content:prompt}] })
           });
           const d = await res.json();
@@ -672,8 +675,8 @@
           "Sii conciso ma completo. Linguaggio accessibile anche per chi non è esperto.";
 
         try {
-          const res = await fetch("https://api.anthropic.com/v1/messages", {
-            method:"POST", headers:{"Content-Type":"application/json"},
+          const res = await fetch(AI_ENDPOINT, {
+            method:"POST", headers:{"Content-Type":"application/json", "Authorization":"Bearer "+SUPABASE_KEY},
             body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:600, messages:[{role:"user",content:prompt}] })
           });
           const d = await res.json();
@@ -702,8 +705,8 @@
           "Rispetta le regole del formato "+buildFormat+" (numero carte, ban list, ecc.).";
 
         try {
-          const res = await fetch("https://api.anthropic.com/v1/messages", {
-            method:"POST", headers:{"Content-Type":"application/json"},
+          const res = await fetch(AI_ENDPOINT, {
+            method:"POST", headers:{"Content-Type":"application/json", "Authorization":"Bearer "+SUPABASE_KEY},
             body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content:prompt}] })
           });
           const d = await res.json();
