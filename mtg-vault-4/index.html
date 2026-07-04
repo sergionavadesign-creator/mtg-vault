@@ -134,30 +134,65 @@
       } catch { return null; }
     }
 
-    // Cerca carte: prima trova nome inglese via fuzzy, poi prende stampe in tutte le lingue
+    // Cerca carte in italiano e inglese
     async function searchCardMulti(query) {
       try {
         const q = query.trim();
         if (!q) return [];
 
-        // Step 1: trova il nome inglese Oracle con fuzzy search (funziona con input italiano/inglese)
-        const fuzzy = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(q)}`)
-          .then(r => r.ok ? r.json() : null).catch(() => null);
+        // Cerca in parallelo: fuzzy inglese + ricerca diretta italiano
+        const [fuzzy, itDirect] = await Promise.all([
+          // Fuzzy inglese — trova nome Oracle anche da input italiano
+          fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(q)}`)
+            .then(r => r.ok ? r.json() : null).catch(() => null),
+          // Ricerca diretta per nome italiano (usa include:multilingual per cercare anche nei nomi stampati)
+          fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(q+" lang:it include:multilingual")}&unique=prints&order=released&limit=20`)
+            .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]),
+        ]);
 
-        // Step 2: cerca per nome esatto inglese per avere tutte le stampe
-        const searchQuery = fuzzy ? `!"${fuzzy.name}" lang:any` : `"${q}" lang:any`;
-        const prints = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(searchQuery)}&unique=prints&order=released&limit=40`)
-          .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]);
+        // Raccogli tutti i nomi inglesi trovati
+        const englishNames = new Set();
+        if (fuzzy) englishNames.add(fuzzy.name);
+        itDirect.forEach(c => englishNames.add(c.name)); // .name è sempre Oracle inglese
 
-        if (prints.length === 0 && !fuzzy) return [];
+        if (englishNames.size === 0) return [];
 
-        // Se fuzzy ha trovato la carta ma non ci sono stampe, usa il fuzzy stesso
-        if (prints.length === 0 && fuzzy) return [fuzzy];
+        // Per ogni nome inglese, prendi TUTTE le stampe in tutte le lingue
+        const allPrintsArrays = await Promise.all(
+          [...englishNames].slice(0, 3).map(name =>
+            fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+name+'" lang:any')}&unique=prints&order=released&limit=40`)
+              .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[])
+          )
+        );
+
+        const prints = allPrintsArrays.flat();
+        if (prints.length === 0) return fuzzy ? [fuzzy] : [];
+
+        // Eredita prezzi dalle stampe inglesi dello stesso set
+        const enPrints = prints.filter(c => c.lang === 'en');
+        const priceBySet = {};
+        enPrints.forEach(c => { if (c.prices?.eur || c.prices?.usd) priceBySet[c.set] = c.prices; });
+        const refPrice = enPrints.find(c => c.prices?.eur || c.prices?.usd)?.prices;
+
+        const withPrices = prints.map(c => {
+          if (cardPrice(c) > 0) return c;
+          if (priceBySet[c.set]) return { ...c, prices: priceBySet[c.set] };
+          if (refPrice) return { ...c, prices: refPrice };
+          return c;
+        });
+
+        // Deduplica
+        const seen = new Set();
+        const deduped = withPrices.filter(c => {
+          const key = c.set+c.collector_number+c.lang;
+          if (seen.has(key)) return false;
+          seen.add(key); return true;
+        });
 
         // Ordina: italiano prima, poi inglese, poi altre lingue
-        const italian = prints.filter(c => c.lang === 'it');
-        const english = prints.filter(c => c.lang === 'en');
-        const others = prints.filter(c => c.lang !== 'it' && c.lang !== 'en');
+        const italian = deduped.filter(c => c.lang === 'it');
+        const english = deduped.filter(c => c.lang === 'en');
+        const others = deduped.filter(c => c.lang !== 'it' && c.lang !== 'en');
 
         return [...italian, ...english, ...others];
       } catch { return []; }
@@ -169,7 +204,17 @@
         return r.ok ? await r.json() : null;
       } catch { return null; }
     }
-    const cardPrice = c => parseFloat(c?.prices?.eur || c?.prices?.usd || 0);
+    // Prezzo: usa EUR se disponibile, fallback USD, fallback 0
+    // Per stampe non-inglesi Scryfall spesso non ha il prezzo — mostriamo N/D invece di 0
+    function cardPrice(c) {
+      const eur = parseFloat(c?.prices?.eur || 0);
+      const usd = parseFloat(c?.prices?.usd || 0);
+      return eur || usd || 0;
+    }
+    function cardPriceDisplay(c) {
+      const p = cardPrice(c);
+      return p > 0 ? "€"+p.toFixed(2) : "N/D";
+    }
     const cardImage = c => c?.image_uris?.normal || c?.card_faces?.[0]?.image_uris?.normal || null;
     const cardLegality = (c, f) => {
       const l = c?.legalities?.[f.toLowerCase()];
@@ -246,7 +291,31 @@
       const [results, setResults] = useState([]); // lista risultati multipli
       const [suggestions, setSuggestions] = useState([]); // autocomplete
       const [showSugg, setShowSugg] = useState(false);
+      const [listening, setListening] = useState(false);
       const debounceRef = useRef(null);
+      const recognizerRef = useRef(null);
+
+      function startVoice() {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { setStatus("Riconoscimento vocale non supportato da questo browser"); return; }
+        if (listening) { recognizerRef.current?.stop(); setListening(false); return; }
+        const rec = new SR();
+        rec.lang = "it-IT";
+        rec.interimResults = false;
+        rec.maxAlternatives = 3;
+        rec.onstart = () => setListening(true);
+        rec.onend = () => setListening(false);
+        rec.onerror = () => { setListening(false); setStatus("Errore microfono — riprova"); };
+        rec.onresult = (e) => {
+          const transcript = e.results[0][0].transcript.trim();
+          setManualName(transcript);
+          setStatus("");
+          setSuggestions([]);
+          setTimeout(() => doManualSearch(transcript), 100);
+        };
+        recognizerRef.current = rec;
+        rec.start();
+      }
 
       // Autocomplete: cerca SEMPRE in italiano e inglese insieme
       function handleTypeahead(val) {
@@ -301,17 +370,21 @@
               <button style={S.btnGhost} onClick={onClose}>✕</button>
             </div>
 
-            {/* Search bar con autocomplete */}
+            {/* Search bar con autocomplete e voce */}
             <div style={{position:"relative"}}>
               <div style={{display:"flex", gap:8}}>
                 <input style={{...S.inp, flex:1}}
-                  placeholder="Scrivi il nome (es. Isola, Lightning…)"
+                  placeholder="Scrivi o ditta il nome carta…"
                   value={manualName}
                   onChange={e => { handleTypeahead(e.target.value); setResults([]); setStatus(""); }}
                   onKeyDown={e => { if(e.key==="Enter"){ e.preventDefault(); manualSearch(); } if(e.key==="Escape") setShowSugg(false); }}
                   onBlur={() => setTimeout(()=>setShowSugg(false), 150)}
                   onFocus={() => suggestions.length>0 && setShowSugg(true)}
                   autoFocus />
+                <button style={{...S.btnP, background:listening?"#ef4444":"#1e1b2e", border:"1px solid #2d2b3e"}}
+                  onClick={startVoice} title="Cerca con la voce">
+                  {listening ? "⏹" : "🎤"}
+                </button>
                 <button style={S.btnP} onClick={manualSearch} disabled={scanning}>🔍</button>
               </div>
               {showSugg && suggestions.length>0 && (
@@ -352,7 +425,7 @@
                         </div>
                       </div>
                       <div style={{textAlign:"right", flexShrink:0}}>
-                        <div style={{fontSize:14, fontWeight:700, color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
+                        <div style={{fontSize:14, fontWeight:700, color:cardPrice(card)>0?"#f59e0b":"#64748b"}}>{cardPriceDisplay(card)}</div>
                         <div style={{fontSize:10, color:"#4e9af1", marginTop:3}}>#{card.collector_number}</div>
                       </div>
                     </div>
@@ -390,7 +463,7 @@
                 <div style={{fontSize:12, color:"#94a3b8", marginBottom:2}}>{card.type_line}</div>
                 <div style={{fontSize:12, color:"#94a3b8", marginBottom:6}}>{card.set_name} · #{card.collector_number}</div>
                 <div style={{fontSize:11, fontWeight:700, color:"#f59e0b", textTransform:"uppercase", marginBottom:4}}>{card.rarity}</div>
-                <div style={{fontSize:22, fontWeight:800, color:"#f59e0b"}}>€{cardPrice(card).toFixed(2)}</div>
+                <div style={{fontSize:22, fontWeight:800, color:"#f59e0b"}}>{cardPriceDisplay(card)}</div>
               </div>
             </div>
 
@@ -771,7 +844,7 @@
                           <div style={S.dMeta}>{card.type}</div>
                           <div style={S.dMeta}>{card.set} · #{card.collectorNumber}</div>
                           <div style={S.dMeta}>Cond: <b>{CONDITION_LABELS[card.condition]}</b> · Qtà: <b>{card.qty}</b></div>
-                          <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>€{(cardPrice(card)*card.qty).toFixed(2)}</b></div>
+                          <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>{cardPrice(card)>0 ? "€"+(cardPrice(card)*card.qty).toFixed(2) : "N/D"}</b></div>
                           <div style={S.legGrid}>
                             {FORMATS.map(f=>(
                               <div key={f} style={{textAlign:"center",fontSize:10}}>
