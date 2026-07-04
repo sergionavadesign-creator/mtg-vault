@@ -134,51 +134,35 @@
       } catch { return null; }
     }
 
-    // Detect likely language from query (basic heuristic)
-    // Cerca SEMPRE in italiano e inglese in parallelo, senza indovinare la lingua
+    // Cerca carte: prima trova nome inglese via fuzzy, poi prende stampe in tutte le lingue
     async function searchCardMulti(query) {
       try {
         const q = query.trim();
         if (!q) return [];
 
-        const urls = [
-          // Nome esatto italiano
-          `https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'" lang:it')}&unique=prints&order=released&limit=30`,
-          // Nome esatto inglese
-          `https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+q+'"')}&unique=prints&order=released&limit=30`,
-          // Nome parziale italiano
-          `https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'" lang:it')}&unique=prints&order=released&limit=30`,
-          // Nome parziale inglese (fallback più ampio)
-          `https://api.scryfall.com/cards/search?q=${encodeURIComponent('name:"'+q+'"')}&unique=prints&order=released&limit=30`,
-        ];
+        // Step 1: trova il nome inglese Oracle con fuzzy search (funziona con input italiano/inglese)
+        const fuzzy = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(q)}`)
+          .then(r => r.ok ? r.json() : null).catch(() => null);
 
-        const results = await Promise.all(
-          urls.map(u => fetch(u).then(r => r.ok ? r.json() : { data: [] }).then(d => d.data || []).catch(() => []))
-        );
+        // Step 2: cerca per nome esatto inglese per avere tutte le stampe
+        const searchQuery = fuzzy ? `!"${fuzzy.name}" lang:any` : `"${q}" lang:any`;
+        const prints = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(searchQuery)}&unique=prints&order=released&limit=40`)
+          .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]);
 
-        // Combina risultati: esatti italiani prima, poi esatti inglesi, poi parziali
-        const [exactIt, exactEn, partialIt, partialEn] = results;
-        if (exactIt.length || exactEn.length) {
-          // Se c'è un match esatto in una lingua, mostra entrambe le lingue per quella carta
-          const combined = [...exactIt, ...exactEn];
-          const seen = new Set();
-          return combined.filter(c => {
-            const key = c.set + c.collector_number + c.lang;
-            if (seen.has(key)) return false;
-            seen.add(key); return true;
-          });
-        }
+        if (prints.length === 0 && !fuzzy) return [];
 
-        // Altrimenti usa i parziali
-        const combinedPartial = [...partialIt, ...partialEn];
-        const seen2 = new Set();
-        return combinedPartial.filter(c => {
-          const key = c.set + c.collector_number + c.lang;
-          if (seen2.has(key)) return false;
-          seen2.add(key); return true;
-        }).slice(0, 30);
+        // Se fuzzy ha trovato la carta ma non ci sono stampe, usa il fuzzy stesso
+        if (prints.length === 0 && fuzzy) return [fuzzy];
+
+        // Ordina: italiano prima, poi inglese, poi altre lingue
+        const italian = prints.filter(c => c.lang === 'it');
+        const english = prints.filter(c => c.lang === 'en');
+        const others = prints.filter(c => c.lang !== 'it' && c.lang !== 'en');
+
+        return [...italian, ...english, ...others];
       } catch { return []; }
     }
+
     async function searchByCode(setCode, number) {
       try {
         const r = await fetch(`https://api.scryfall.com/cards/${setCode.toLowerCase()}/${number}`);
