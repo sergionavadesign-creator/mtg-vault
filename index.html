@@ -20,6 +20,8 @@
     a { color: #34d399; }
     .fade-in { animation: fadeIn .25s ease; }
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    .flip-in { animation: flipIn .32s ease; }
+    @keyframes flipIn { from { opacity:0; transform:perspective(900px) rotateY(85deg); } to { opacity:1; transform:perspective(900px) rotateY(0); } }
   </style>
 </head>
 <body>
@@ -767,6 +769,39 @@
           {confirmCard && (
             <CardConfirmModal card={confirmCard} onAdd={addCard} onClose={() => setConfirmCard(null)} />
           )}
+          {selectedCard && (
+            <div style={S.modalOverlay} onClick={()=>setSelectedCard(null)}>
+              <div style={{...S.modalBox, maxWidth:440, maxHeight:"90vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="flip-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700, fontSize:15}}>{selectedCard.printed_name || selectedCard.name}</span>
+                  <button style={S.btnGhost} onClick={()=>setSelectedCard(null)}>✕</button>
+                </div>
+                <div style={{display:"flex", gap:14, marginBottom:14}}>
+                  {selectedCard.image
+                    ? <img src={selectedCard.image} alt={selectedCard.name} style={{width:130, borderRadius:8, flexShrink:0}}/>
+                    : <div style={{...S.tileNoImg, width:130, borderRadius:8}}>{selectedCard.printed_name || selectedCard.name}</div>
+                  }
+                  <div style={{flex:1, minWidth:0}}>
+                    <div style={S.dMeta}>{selectedCard.type}</div>
+                    <div style={S.dMeta}>{selectedCard.set} · #{selectedCard.collectorNumber}</div>
+                    <div style={S.dMeta}>Cond: <b>{CONDITION_LABELS[selectedCard.condition]}</b></div>
+                    <div style={S.dMeta}>Qtà: <b>{selectedCard.qty}</b></div>
+                    <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>{cardPrice(selectedCard)>0 ? "€"+(cardPrice(selectedCard)*selectedCard.qty).toFixed(2) : "N/D"}</b></div>
+                  </div>
+                </div>
+                <div style={S.legGrid}>
+                  {FORMATS.map(f=>(
+                    <div key={f} style={{textAlign:"center",fontSize:11}}>
+                      <div style={{fontSize:14}}>{cardLegality(selectedCard,f)}</div>
+                      <div style={{color:"#64748b", fontSize:10}}>{f.slice(0,4)}</div>
+                    </div>
+                  ))}
+                </div>
+                <button style={{...S.btnExplain, marginTop:14}} onClick={()=>{explainCardFn(selectedCard); setSelectedCard(null);}}>💬 Spiega questa carta</button>
+                <button style={{...S.btnDel, width:"100%", marginTop:8}} onClick={()=>removeCard(selectedCard.id)}>🗑 Rimuovi</button>
+              </div>
+            </div>
+          )}
 
           <header style={S.header}>
             <div style={S.hTop}>
@@ -823,7 +858,7 @@
                 )}
                 <div style={S.grid}>
                   {filteredCollection.map(card => (
-                    <div key={card.id} style={S.tile} onClick={() => setSelectedCard(selectedCard?.id===card.id?null:card)}>
+                    <div key={card.id} style={S.tile} onClick={() => setSelectedCard(card)}>
                       {card.image
                         ? <img src={card.image} alt={card.name} style={S.tileImg}/>
                         : <div style={S.tileNoImg}>{card.printed_name || card.name}</div>
@@ -838,25 +873,6 @@
                           <button style={S.qtyBtn} onClick={()=>updateQty(card.id,+1)}>+</button>
                         </div>
                       </div>
-                      {selectedCard?.id===card.id && (
-                        <div style={S.detail} onClick={e=>e.stopPropagation()}>
-                          <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>{card.printed_name || card.name}</div>
-                          <div style={S.dMeta}>{card.type}</div>
-                          <div style={S.dMeta}>{card.set} · #{card.collectorNumber}</div>
-                          <div style={S.dMeta}>Cond: <b>{CONDITION_LABELS[card.condition]}</b> · Qtà: <b>{card.qty}</b></div>
-                          <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>{cardPrice(card)>0 ? "€"+(cardPrice(card)*card.qty).toFixed(2) : "N/D"}</b></div>
-                          <div style={S.legGrid}>
-                            {FORMATS.map(f=>(
-                              <div key={f} style={{textAlign:"center",fontSize:10}}>
-                                <div>{cardLegality(card,f)}</div>
-                                <div style={{color:"#64748b"}}>{f.slice(0,4)}</div>
-                              </div>
-                            ))}
-                          </div>
-                          <button style={S.btnExplain} onClick={e=>{e.stopPropagation();explainCardFn(card);}}>💬 Spiega questa carta</button>
-                          <button style={S.btnDel} onClick={()=>removeCard(card.id)}>🗑 Rimuovi</button>
-                        </div>
-                      )}
                     </div>
                   ))}
                 </div>
