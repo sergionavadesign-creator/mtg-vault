@@ -297,8 +297,22 @@
       const [suggestions, setSuggestions] = useState([]); // autocomplete
       const [showSugg, setShowSugg] = useState(false);
       const [listening, setListening] = useState(false);
+      const [showFilters, setShowFilters] = useState(false);
+      const [filterLang, setFilterLang] = useState("");
+      const [filterYear, setFilterYear] = useState("");
       const debounceRef = useRef(null);
       const recognizerRef = useRef(null);
+
+      const LANG_NAMES = {en:"🇬🇧 Inglese",it:"🇮🇹 Italiano",fr:"🇫🇷 Francese",de:"🇩🇪 Tedesco",es:"🇪🇸 Spagnolo",pt:"🇵🇹 Portoghese",ja:"🇯🇵 Giapponese",ko:"🇰🇷 Coreano",ru:"🇷🇺 Russo",zhs:"🇨🇳 Cinese sempl.",zht:"🇨🇳 Cinese trad."};
+      // Lingue e anni disponibili nei risultati correnti
+      const availLangs = [...new Set(results.map(c => c.lang).filter(Boolean))];
+      const availYears = [...new Set(results.map(c => c.released_at ? c.released_at.slice(0,4) : null).filter(Boolean))].sort((a,b)=>b-a);
+      // Applica i filtri opzionali
+      const filteredResults = results.filter(c => {
+        const okLang = !filterLang || c.lang === filterLang;
+        const okYear = !filterYear || (c.released_at && c.released_at.slice(0,4) === filterYear);
+        return okLang && okYear;
+      });
 
       function startVoice() {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -355,6 +369,7 @@
         const q = (name || manualName).trim();
         if (!q) return;
         setScanning(true); setResults([]); setShowSugg(false); setStatus("Cercando…");
+        setFilterLang(""); setFilterYear(""); setShowFilters(false);
         const cards = await searchCardMulti(q);
         if (cards.length===1) { onFound(cards[0]); }
         else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} edizioni trovate — scegli quella che hai:`); }
@@ -403,15 +418,43 @@
               )}
             </div>
 
-            {/* Status quando ci sono risultati */}
+            {/* Barra filtri (visibile solo con risultati) */}
             {results.length>0 && (
-              <div style={{fontSize:12, color:"#34d399", margin:"10px 0 4px", fontWeight:600}}>{status}</div>
+              <div style={{marginTop:10}}>
+                <div style={{display:"flex", alignItems:"center", gap:8}}>
+                  <div style={{fontSize:12, color:"#34d399", fontWeight:600, flex:1}}>
+                    {filteredResults.length} di {results.length} edizioni
+                  </div>
+                  <button style={{...S.btnGhost, background:(filterLang||filterYear)?"#1e1b2e":"transparent"}}
+                    onClick={()=>setShowFilters(v=>!v)}>
+                    ⚙️ Filtri {(filterLang||filterYear) ? "•" : ""}
+                  </button>
+                </div>
+                {showFilters && (
+                  <div style={{display:"flex", gap:8, marginTop:8}} className="fade-in">
+                    <select style={{...S.sel, flex:1}} value={filterLang} onChange={e=>setFilterLang(e.target.value)}>
+                      <option value="">Tutte le lingue</option>
+                      {availLangs.map(l => <option key={l} value={l}>{LANG_NAMES[l] || l.toUpperCase()}</option>)}
+                    </select>
+                    <select style={{...S.sel, flex:1}} value={filterYear} onChange={e=>setFilterYear(e.target.value)}>
+                      <option value="">Tutti gli anni</option>
+                      {availYears.map(y => <option key={y} value={y}>{y}</option>)}
+                    </select>
+                    {(filterLang||filterYear) && (
+                      <button style={S.btnGhost} onClick={()=>{setFilterLang("");setFilterYear("");}} title="Azzera filtri">✕</button>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Lista risultati */}
             {results.length>0 && (
               <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}}>
-                {results.map(card => {
+                {filteredResults.length===0 && (
+                  <div style={{textAlign:"center", fontSize:12, color:"#94a3b8", padding:"16px 0"}}>Nessuna edizione con questi filtri.</div>
+                )}
+                {filteredResults.map(card => {
                   const year = card.released_at ? card.released_at.slice(0,4) : "";
                   const langFlag = {en:"🇬🇧",it:"🇮🇹",fr:"🇫🇷",de:"🇩🇪",es:"🇪🇸",pt:"🇵🇹",ja:"🇯🇵",ko:"🇰🇷",ru:"🇷🇺",zhs:"🇨🇳",zht:"🇨🇳"}[card.lang] || card.lang?.toUpperCase() || "";
                   return (
@@ -665,14 +708,13 @@
         setExplainCard(card);
         setExplainText(null);
         setExplaining(true);
-        const prompt = "Sei un esperto di Magic: The Gathering. Spiega in italiano questa carta:\n\n"+
-          "Nome: "+card.name+"\nTipo: "+card.type+"\nCosto mana: "+(card.manaCost||"N/A")+"\nSet: "+card.set+"\nRarità: "+card.rarity+"\n\n"+
-          "Spiega in italiano:\n"+
-          "1. **Cosa fa** (spiegazione semplice dell'effetto)\n"+
-          "2. **Come si usa** (quando e perché giocarla)\n"+
-          "3. **Sinergie** (con quali altri tipi di carte funziona bene)\n"+
-          "4. **Punti di forza e debolezza**\n\n"+
-          "Sii conciso ma completo. Linguaggio accessibile anche per chi non è esperto.";
+        const prompt = "Sei un esperto di Magic: The Gathering. Spiegami cosa fa questa carta: \""+card.name+"\" (tipo: "+(card.type||"?")+").\n\n"+
+          "Spiega in italiano, in modo chiaro anche per chi non è esperto:\n"+
+          "- Cosa fa (l'effetto)\n"+
+          "- Come e quando si usa\n"+
+          "- Con quali carte funziona bene (sinergie)\n"+
+          "- Punti di forza e debolezza\n\n"+
+          "IMPORTANTE: inizia DIRETTAMENTE con la spiegazione. NON scrivere frasi introduttive tipo 'Assolutamente' o 'Ecco'. NON ripetere nome, tipo, costo mana, set o rarità: quelli sono già mostrati altrove.";
 
         try {
           const res = await fetch(AI_ENDPOINT, {
@@ -728,6 +770,32 @@
         });
       }
 
+      // Rende grassetti **testo** dentro una riga
+      function renderInline(text) {
+        return text.split(/(\*\*[^*]+\*\*)/g).map((p,j) =>
+          /^\*\*[^*]+\*\*$/.test(p) ? <b key={j}>{p.slice(2,-2)}</b> : p
+        );
+      }
+
+      // Rende testo markdown: header ###, righe **grassetto**, elenchi, paragrafi
+      function renderRich(text) {
+        return text.split("\n").map((line,i) => {
+          let l = line.trim();
+          if (!l) return <br key={i}/>;
+          if (l === "---" || l === "***" || l === "___") return null; // divisori ignorati
+          if (l.startsWith("#")) {
+            return <div key={i} style={S.aH2}>{renderInline(l.replace(/^#+\s*/,""))}</div>;
+          }
+          if (/^\*\*[^*]+\*\*$/.test(l)) {
+            return <div key={i} style={S.aH2}>{l.slice(2,-2)}</div>;
+          }
+          if (/^[-•*]\s/.test(l)) {
+            return <div key={i} style={S.aLi}>▸ {renderInline(l.replace(/^[-•*]\s/,""))}</div>;
+          }
+          return <p key={i} style={S.aP}>{renderInline(l)}</p>;
+        });
+      }
+
       // ── PROFILE SCREEN ──
       if (!activeProfileId) {
         return <ProfileScreen data={data} onSelect={setActiveProfileId} onCreate={createProfile} onDelete={handleDeleteProfile} />;
@@ -741,10 +809,13 @@
               <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
                 <div style={S.modalHeader}>
                   <div style={{display:"flex",alignItems:"center",gap:10}}>
-                    {explainCard.image && <img src={explainCard.image} style={{width:40,borderRadius:4}}/>}
+                    {explainCard.image && <img src={explainCard.image} style={{width:46,borderRadius:4}}/>}
                     <div>
                       <div style={{fontWeight:700,fontSize:14}}>{explainCard.printed_name || explainCard.name}</div>
                       <div style={{fontSize:11,color:"#94a3b8"}}>{explainCard.type}</div>
+                      <div style={{fontSize:10,color:"#64748b",marginTop:2,textTransform:"capitalize"}}>
+                        {[explainCard.manaCost, explainCard.set, explainCard.rarity].filter(Boolean).join(" · ")}
+                      </div>
                     </div>
                   </div>
                   <button style={S.btnGhost} onClick={()=>{setExplainCard(null);setExplainText(null);}}>✕</button>
@@ -757,10 +828,7 @@
                 )}
                 {explainText && (
                   <div style={{marginTop:4}}>
-                    {explainText.split("\n").map((line,i)=>{
-                      if(line.startsWith("**")&&line.endsWith("**")) return <div key={i} style={S.aH2}>{line.replace(/\*\*/g,"")}</div>;
-                      return line.trim() ? <p key={i} style={S.aP}>{line}</p> : <br key={i}/>;
-                    })}
+                    {renderRich(explainText)}
                   </div>
                 )}
               </div>
