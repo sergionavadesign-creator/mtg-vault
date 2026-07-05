@@ -109,9 +109,10 @@
           condition: card.condition, qty: card.qty
         };
         const { error } = await sb.from("cards").upsert(row);
-        if (error) { console.error("saveCard error", error); return false; }
+        if (error) { console.error("saveCard error", error); window.__lastSaveError = (error.message||"") + " | code: " + (error.code||"") + " | details: " + (error.details||"") + " | hint: " + (error.hint||""); return false; }
+        window.__lastSaveError = null;
         return true; // salvataggio confermato da Supabase
-      } catch(e) { console.error("saveCard error", e); return false; }
+      } catch(e) { console.error("saveCard error", e); window.__lastSaveError = String(e); return false; }
     }
 
     async function deleteCard(id) {
@@ -739,7 +740,7 @@
           p.id===activeProfileId ? { ...p, cards: [...(p.cards||[]), newCard] } : p
         )};
         persist(u); setConfirmCard(null); setShowScan(false);
-        if (!ok) alert("⚠️ Attenzione: questa carta non è stata salvata sul database (solo in locale). Controlla la connessione o i permessi.");
+        if (!ok) alert("⚠️ Non salvata sul database.\n\nERRORE ESATTO:\n" + (window.__lastSaveError || "(nessun dettaglio)"));
       }
 
       async function removeCard(id) {
