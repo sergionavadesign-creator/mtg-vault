@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0a0a0f" />
-  <title>MTG Vault</title>
+  <title>MyMagic</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -143,66 +143,77 @@
     }
 
     // Cerca carte in italiano e inglese
+    // Trova i nomi inglesi (Oracle) a partire da un input in qualsiasi lingua
+    async function findOracleNames(q) {
+      const query = q.trim();
+      if (!query) return [];
+      const [fuzzy, itDirect] = await Promise.all([
+        fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(query)}`)
+          .then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(query+" lang:it include:multilingual")}&unique=prints&order=released&limit=20`)
+          .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]),
+      ]);
+      const names = new Set();
+      if (fuzzy) names.add(fuzzy.name);
+      itDirect.forEach(c => names.add(c.name)); // .name è sempre Oracle inglese
+      return [...names];
+    }
+
+    // Costruisce la query Scryfall per un nome + filtri opzionali (lingua/anno/set/numero)
+    function buildPrintsQuery(name, f) {
+      let q = '!"'+name+'"';
+      q += (f && f.lang) ? ' lang:'+f.lang : ' lang:any';
+      if (f && f.year) q += ' year:'+f.year;
+      if (f && f.set)  q += ' set:'+f.set;
+      if (f && f.num)  q += ' cn:'+f.num;
+      return q;
+    }
+
+    // Scarica le stampe per i nomi dati, applicando i filtri nella query Scryfall
+    async function fetchPrints(names, f) {
+      if (!names || names.length === 0) return [];
+      const arrays = await Promise.all(
+        names.slice(0, 3).map(name =>
+          fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(buildPrintsQuery(name, f))}&unique=prints&order=released`)
+            .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[])
+        )
+      );
+      const prints = arrays.flat();
+      if (prints.length === 0) return [];
+
+      // Eredita prezzi dalle stampe inglesi dello stesso set
+      const enPrints = prints.filter(c => c.lang === 'en');
+      const priceBySet = {};
+      enPrints.forEach(c => { if (c.prices?.eur || c.prices?.usd) priceBySet[c.set] = c.prices; });
+      const refPrice = enPrints.find(c => c.prices?.eur || c.prices?.usd)?.prices;
+      const withPrices = prints.map(c => {
+        if (cardPrice(c) > 0) return c;
+        if (priceBySet[c.set]) return { ...c, prices: priceBySet[c.set] };
+        if (refPrice) return { ...c, prices: refPrice };
+        return c;
+      });
+
+      // Deduplica
+      const seen = new Set();
+      const deduped = withPrices.filter(c => {
+        const key = c.set+c.collector_number+c.lang;
+        if (seen.has(key)) return false;
+        seen.add(key); return true;
+      });
+
+      // Ordina: italiano, poi inglese, poi altre lingue
+      const italian = deduped.filter(c => c.lang === 'it');
+      const english = deduped.filter(c => c.lang === 'en');
+      const others = deduped.filter(c => c.lang !== 'it' && c.lang !== 'en');
+      return [...italian, ...english, ...others];
+    }
+
+    // Ricerca completa senza filtri (compatibilità)
     async function searchCardMulti(query) {
       try {
-        const q = query.trim();
-        if (!q) return [];
-
-        // Cerca in parallelo: fuzzy inglese + ricerca diretta italiano
-        const [fuzzy, itDirect] = await Promise.all([
-          // Fuzzy inglese — trova nome Oracle anche da input italiano
-          fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(q)}`)
-            .then(r => r.ok ? r.json() : null).catch(() => null),
-          // Ricerca diretta per nome italiano (usa include:multilingual per cercare anche nei nomi stampati)
-          fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(q+" lang:it include:multilingual")}&unique=prints&order=released&limit=20`)
-            .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]),
-        ]);
-
-        // Raccogli tutti i nomi inglesi trovati
-        const englishNames = new Set();
-        if (fuzzy) englishNames.add(fuzzy.name);
-        itDirect.forEach(c => englishNames.add(c.name)); // .name è sempre Oracle inglese
-
-        if (englishNames.size === 0) return [];
-
-        // Per ogni nome inglese, prendi TUTTE le stampe in tutte le lingue
-        const allPrintsArrays = await Promise.all(
-          [...englishNames].slice(0, 3).map(name =>
-            fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+name+'" lang:any')}&unique=prints&order=released&limit=40`)
-              .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[])
-          )
-        );
-
-        const prints = allPrintsArrays.flat();
-        if (prints.length === 0) return fuzzy ? [fuzzy] : [];
-
-        // Eredita prezzi dalle stampe inglesi dello stesso set
-        const enPrints = prints.filter(c => c.lang === 'en');
-        const priceBySet = {};
-        enPrints.forEach(c => { if (c.prices?.eur || c.prices?.usd) priceBySet[c.set] = c.prices; });
-        const refPrice = enPrints.find(c => c.prices?.eur || c.prices?.usd)?.prices;
-
-        const withPrices = prints.map(c => {
-          if (cardPrice(c) > 0) return c;
-          if (priceBySet[c.set]) return { ...c, prices: priceBySet[c.set] };
-          if (refPrice) return { ...c, prices: refPrice };
-          return c;
-        });
-
-        // Deduplica
-        const seen = new Set();
-        const deduped = withPrices.filter(c => {
-          const key = c.set+c.collector_number+c.lang;
-          if (seen.has(key)) return false;
-          seen.add(key); return true;
-        });
-
-        // Ordina: italiano prima, poi inglese, poi altre lingue
-        const italian = deduped.filter(c => c.lang === 'it');
-        const english = deduped.filter(c => c.lang === 'en');
-        const others = deduped.filter(c => c.lang !== 'it' && c.lang !== 'en');
-
-        return [...italian, ...english, ...others];
+        const names = await findOracleNames(query);
+        if (names.length === 0) return [];
+        return await fetchPrints(names, {});
       } catch { return []; }
     }
 
@@ -244,8 +255,8 @@
       return (
         <div style={S.psWrap} className="fade-in">
           <div style={S.psLogo}>
-            <span style={S.psGlyph}>⬡</span>
-            <div style={S.psTitle}>MTG Vault</div>
+            <span style={S.psGlyph}>✦</span>
+            <div style={S.psTitle}>MyMagic</div>
             <div style={S.psSub}>Chi sta giocando?</div>
           </div>
 
@@ -301,21 +312,43 @@
       const [showSugg, setShowSugg] = useState(false);
       const [listening, setListening] = useState(false);
       const [showFilters, setShowFilters] = useState(false);
+      const [oracleNames, setOracleNames] = useState([]);
       const [filterLang, setFilterLang] = useState("");
       const [filterYear, setFilterYear] = useState("");
+      const [filterSet, setFilterSet] = useState("");
+      const [filterNum, setFilterNum] = useState("");
       const debounceRef = useRef(null);
       const recognizerRef = useRef(null);
 
       const LANG_NAMES = {en:"🇬🇧 Inglese",it:"🇮🇹 Italiano",fr:"🇫🇷 Francese",de:"🇩🇪 Tedesco",es:"🇪🇸 Spagnolo",pt:"🇵🇹 Portoghese",ja:"🇯🇵 Giapponese",ko:"🇰🇷 Coreano",ru:"🇷🇺 Russo",zhs:"🇨🇳 Cinese sempl.",zht:"🇨🇳 Cinese trad."};
-      // Lingue e anni disponibili nei risultati correnti
-      const availLangs = [...new Set(results.map(c => c.lang).filter(Boolean))];
-      const availYears = [...new Set(results.map(c => c.released_at ? c.released_at.slice(0,4) : null).filter(Boolean))].sort((a,b)=>b-a);
-      // Applica i filtri opzionali
-      const filteredResults = results.filter(c => {
-        const okLang = !filterLang || c.lang === filterLang;
-        const okYear = !filterYear || (c.released_at && c.released_at.slice(0,4) === filterYear);
-        return okLang && okYear;
-      });
+      const LANG_LIST = ["it","en","fr","de","es","pt","ja","ko","ru","zhs","zht"];
+      const YEAR_LIST = (() => { const y=[]; for (let a=new Date().getFullYear(); a>=1993; a--) y.push(String(a)); return y; })();
+      // Set disponibili nei risultati correnti (codice + nome), per il menu set
+      const availSets = [...new Map(results.map(c => [c.set, {code:c.set, name:c.set_name}])).values()]
+        .sort((a,b)=> (a.name||"").localeCompare(b.name||""));
+      const anyFilter = filterLang || filterYear || filterSet || filterNum;
+
+      // Rifà la ricerca su Scryfall con i filtri (trova anche edizioni vecchie/rare)
+      async function reSearch(f) {
+        if (!oracleNames.length) return;
+        setScanning(true); setStatus("Cercando…");
+        const cards = await fetchPrints(oracleNames, f);
+        setResults(cards);
+        setStatus(cards.length ? `${cards.length} edizioni` : "Nessuna edizione con questi filtri.");
+        setScanning(false);
+      }
+      function changeFilter(patch) {
+        const f = { lang:filterLang, year:filterYear, set:filterSet, num:filterNum, ...patch };
+        if ("lang" in patch) setFilterLang(patch.lang);
+        if ("year" in patch) setFilterYear(patch.year);
+        if ("set" in patch) setFilterSet(patch.set);
+        if ("num" in patch) setFilterNum(patch.num);
+        reSearch(f);
+      }
+      function clearFilters() {
+        setFilterLang(""); setFilterYear(""); setFilterSet(""); setFilterNum("");
+        reSearch({});
+      }
 
       function startVoice() {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -372,8 +405,11 @@
         const q = (name || manualName).trim();
         if (!q) return;
         setScanning(true); setResults([]); setShowSugg(false); setStatus("Cercando…");
-        setFilterLang(""); setFilterYear(""); setShowFilters(false);
-        const cards = await searchCardMulti(q);
+        setFilterLang(""); setFilterYear(""); setFilterSet(""); setFilterNum(""); setShowFilters(false);
+        const names = await findOracleNames(q);
+        setOracleNames(names);
+        if (names.length === 0) { setStatus("Nessuna carta trovata. Controlla il nome."); setScanning(false); return; }
+        const cards = await fetchPrints(names, {});
         if (cards.length===1) { onFound(cards[0]); }
         else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} edizioni trovate — scegli quella che hai:`); }
         else { setStatus("Nessuna carta trovata. Controlla il nome."); }
@@ -421,30 +457,43 @@
               )}
             </div>
 
-            {/* Barra filtri (visibile solo con risultati) */}
-            {results.length>0 && (
+            {/* Barra filtri (dopo una ricerca) */}
+            {oracleNames.length>0 && (
               <div style={{marginTop:10}}>
                 <div style={{display:"flex", alignItems:"center", gap:8}}>
                   <div style={{fontSize:12, color:"#34d399", fontWeight:600, flex:1}}>
-                    {filteredResults.length} di {results.length} edizioni
+                    {results.length} edizioni{anyFilter ? " (filtrate)" : ""}
                   </div>
-                  <button style={{...S.btnGhost, background:(filterLang||filterYear)?"#1e1b2e":"transparent"}}
+                  <button style={{...S.btnGhost, background:anyFilter?"#1e1b2e":"transparent"}}
                     onClick={()=>setShowFilters(v=>!v)}>
-                    ⚙️ Filtri {(filterLang||filterYear) ? "•" : ""}
+                    ⚙️ Filtri {anyFilter ? "•" : ""}
                   </button>
                 </div>
                 {showFilters && (
-                  <div style={{display:"flex", gap:8, marginTop:8}} className="fade-in">
-                    <select style={{...S.sel, flex:1}} value={filterLang} onChange={e=>setFilterLang(e.target.value)}>
-                      <option value="">Tutte le lingue</option>
-                      {availLangs.map(l => <option key={l} value={l}>{LANG_NAMES[l] || l.toUpperCase()}</option>)}
-                    </select>
-                    <select style={{...S.sel, flex:1}} value={filterYear} onChange={e=>setFilterYear(e.target.value)}>
-                      <option value="">Tutti gli anni</option>
-                      {availYears.map(y => <option key={y} value={y}>{y}</option>)}
-                    </select>
-                    {(filterLang||filterYear) && (
-                      <button style={S.btnGhost} onClick={()=>{setFilterLang("");setFilterYear("");}} title="Azzera filtri">✕</button>
+                  <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}} className="fade-in">
+                    <div style={{display:"flex", gap:8}}>
+                      <select style={{...S.sel, flex:1}} value={filterLang} onChange={e=>changeFilter({lang:e.target.value})}>
+                        <option value="">Tutte le lingue</option>
+                        {LANG_LIST.map(l => <option key={l} value={l}>{LANG_NAMES[l] || l.toUpperCase()}</option>)}
+                      </select>
+                      <select style={{...S.sel, flex:1}} value={filterYear} onChange={e=>changeFilter({year:e.target.value})}>
+                        <option value="">Tutti gli anni</option>
+                        {YEAR_LIST.map(y => <option key={y} value={y}>{y}</option>)}
+                      </select>
+                    </div>
+                    <div style={{display:"flex", gap:8}}>
+                      <select style={{...S.sel, flex:1}} value={filterSet} onChange={e=>changeFilter({set:e.target.value})}>
+                        <option value="">Tutti i set</option>
+                        {availSets.map(s => <option key={s.code} value={s.code}>{s.name}</option>)}
+                      </select>
+                      <input style={{...S.inp, width:96}} type="text" inputMode="numeric" placeholder="N° carta"
+                        value={filterNum}
+                        onChange={e=>setFilterNum(e.target.value.replace(/[^0-9a-zA-Z]/g,''))}
+                        onKeyDown={e=>{ if(e.key==="Enter") changeFilter({num:filterNum}); }}
+                        onBlur={()=>{ if(filterNum!=="") changeFilter({num:filterNum}); }} />
+                    </div>
+                    {anyFilter && (
+                      <button style={{...S.btnGhost, alignSelf:"flex-start"}} onClick={clearFilters}>✕ Azzera filtri</button>
                     )}
                   </div>
                 )}
@@ -454,10 +503,7 @@
             {/* Lista risultati */}
             {results.length>0 && (
               <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}}>
-                {filteredResults.length===0 && (
-                  <div style={{textAlign:"center", fontSize:12, color:"#94a3b8", padding:"16px 0"}}>Nessuna edizione con questi filtri.</div>
-                )}
-                {filteredResults.map(card => {
+                {results.map(card => {
                   const year = card.released_at ? card.released_at.slice(0,4) : "";
                   const langFlag = {en:"🇬🇧",it:"🇮🇹",fr:"🇫🇷",de:"🇩🇪",es:"🇪🇸",pt:"🇵🇹",ja:"🇯🇵",ko:"🇰🇷",ru:"🇷🇺",zhs:"🇨🇳",zht:"🇨🇳"}[card.lang] || card.lang?.toUpperCase() || "";
                   return (
@@ -878,9 +924,9 @@
           <header style={S.header}>
             <div style={S.hTop}>
               <div style={S.logo}>
-                <span style={S.logoIcon}>⬡</span>
+                <span style={S.logoIcon}>✦</span>
                 <div>
-                  <div style={S.logoTitle}>MTG Vault</div>
+                  <div style={S.logoTitle}>MyMagic</div>
                   <div style={S.logoSub}>{activeProfile?.avatar} {activeProfile?.name}</div>
                 </div>
               </div>
