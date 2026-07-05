@@ -68,6 +68,7 @@
               ...c, id: c.id, scryfallId: c.scryfall_id, set: c.set_name,
               setCode: c.set_code, collectorNumber: c.collector_number,
               manaCost: c.mana_cost, type: c.type_line, image: c.image, printed_name: c.printed_name||null,
+              synced: true,
             }))
           })),
           decks: (decks||[]).map(d => ({
@@ -107,8 +108,10 @@
           legalities: card.legalities, prices: card.prices, image: card.image,
           condition: card.condition, qty: card.qty
         };
-        await sb.from("cards").upsert(row);
-      } catch(e) { console.error("saveCard error", e); }
+        const { error } = await sb.from("cards").upsert(row);
+        if (error) { console.error("saveCard error", error); return false; }
+        return true; // salvataggio confermato da Supabase
+      } catch(e) { console.error("saveCard error", e); return false; }
     }
 
     async function deleteCard(id) {
@@ -599,17 +602,19 @@
       // Card management
       async function addCard(card, condition, qty) {
         const newCard = {
-          id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null, printed_name:card.printed_name||null,
+          id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null,
           set:card.set_name, setCode:card.set, collectorNumber:card.collector_number,
           rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[],
           type:card.type_line||"", legalities:card.legalities||{}, prices:card.prices||{},
           image:cardImage(card), condition, qty, addedAt:new Date().toISOString()
         };
-        await saveCard(newCard, activeProfileId);
+        const ok = await saveCard(newCard, activeProfileId);
+        newCard.synced = ok; // true = salvata su Supabase, false = solo locale (a rischio)
         const u = { ...data, profiles: data.profiles.map(p =>
           p.id===activeProfileId ? { ...p, cards: [...(p.cards||[]), newCard] } : p
         )};
         persist(u); setConfirmCard(null); setShowScan(false);
+        if (!ok) alert("⚠️ Attenzione: questa carta non è stata salvata sul database (solo in locale). Controlla la connessione o i permessi.");
       }
 
       async function removeCard(id) {
@@ -708,13 +713,11 @@
         setExplainCard(card);
         setExplainText(null);
         setExplaining(true);
-        const prompt = "Sei un esperto di Magic: The Gathering. Spiegami cosa fa questa carta: \""+card.name+"\" (tipo: "+(card.type||"?")+").\n\n"+
-          "Spiega in italiano, in modo chiaro anche per chi non è esperto:\n"+
-          "- Cosa fa (l'effetto)\n"+
-          "- Come e quando si usa\n"+
-          "- Con quali carte funziona bene (sinergie)\n"+
-          "- Punti di forza e debolezza\n\n"+
-          "IMPORTANTE: inizia DIRETTAMENTE con la spiegazione. NON scrivere frasi introduttive tipo 'Assolutamente' o 'Ecco'. NON ripetere nome, tipo, costo mana, set o rarità: quelli sono già mostrati altrove.";
+        const prompt = "Sei un esperto di Magic: The Gathering. Spiega la carta \""+card.name+"\" (tipo: "+(card.type||"?")+") a un giocatore, per aiutarlo durante la partita.\n\n"+
+          "Rispondi in italiano, in modo BREVE e pratico. Usa ESATTAMENTE questo formato, con queste due sezioni e nient'altro:\n\n"+
+          "**Cosa fa**\n(2-3 frasi che spiegano l'effetto della carta)\n\n"+
+          "**Come e quando si usa**\n(2-3 frasi pratiche su quando giocarla)\n\n"+
+          "REGOLE FERREE: massimo 90 parole in totale. Nessuna introduzione tipo 'Assolutamente' o 'Ecco'. Nessun elenco puntato. Nessuna altra sezione (niente sinergie, niente pro/contro). Non ripetere nome, tipo, costo, set o rarità.";
 
         try {
           const res = await fetch(AI_ENDPOINT, {
@@ -806,8 +809,8 @@
         <div style={S.app}>
           {explainCard && (
             <div style={S.modalOverlay} onClick={()=>{setExplainCard(null);setExplainText(null);}}>
-              <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
-                <div style={S.modalHeader}>
+              <div style={{...S.modalBox, maxHeight:"85vh", display:"flex", flexDirection:"column"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={{...S.modalHeader, flexShrink:0}}>
                   <div style={{display:"flex",alignItems:"center",gap:10}}>
                     {explainCard.image && <img src={explainCard.image} style={{width:46,borderRadius:4}}/>}
                     <div>
@@ -820,17 +823,15 @@
                   </div>
                   <button style={S.btnGhost} onClick={()=>{setExplainCard(null);setExplainText(null);}}>✕</button>
                 </div>
-                {explaining && (
-                  <div style={{textAlign:"center",padding:"30px 0",color:"#64748b"}}>
-                    <div style={{fontSize:28,marginBottom:8}}>⏳</div>
-                    <div>Analisi in corso…</div>
-                  </div>
-                )}
-                {explainText && (
-                  <div style={{marginTop:4}}>
-                    {renderRich(explainText)}
-                  </div>
-                )}
+                <div style={{flex:1, overflowY:"auto", minHeight:0, marginTop:4}}>
+                  {explaining && (
+                    <div style={{textAlign:"center",padding:"40px 0",color:"#64748b"}}>
+                      <div style={{fontSize:28,marginBottom:8}}>⏳</div>
+                      <div>Analisi in corso…</div>
+                    </div>
+                  )}
+                  {explainText && renderRich(explainText)}
+                </div>
               </div>
             </div>
           )}
@@ -930,6 +931,9 @@
                 <div style={S.grid}>
                   {filteredCollection.map(card => (
                     <div key={card.id} style={S.tile} onClick={() => setSelectedCard(card)}>
+                      {card.synced === false && (
+                        <div style={S.syncWarn} title="Non salvata sul database (solo locale)">⚠️</div>
+                      )}
                       {card.image
                         ? <img src={card.image} alt={card.name} style={S.tileImg}/>
                         : <div style={S.tileNoImg}>{card.printed_name || card.name}</div>
@@ -1202,6 +1206,7 @@
       empty:{color:"#4a4570",textAlign:"center",padding:"36px 20px",fontSize:13},
       grid:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(145px,1fr))",gap:12},
       tile:{background:"#12101a",border:"1px solid #1e1b2e",borderRadius:10,cursor:"pointer",position:"relative"},
+      syncWarn:{position:"absolute",top:6,left:6,zIndex:5,background:"rgba(10,10,15,.85)",borderRadius:6,padding:"2px 5px",fontSize:14,lineHeight:1,border:"1px solid #7f1d1d"},
       tileImg:{width:"100%",borderRadius:"10px 10px 0 0",display:"block"},
       tileNoImg:{padding:20,textAlign:"center",fontSize:12,color:"#64748b",background:"#1e1b2e",minHeight:100,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:"10px 10px 0 0"},
       tileBody:{padding:"8px 10px"},
