@@ -317,6 +317,12 @@
       const [filterYear, setFilterYear] = useState("");
       const [filterSet, setFilterSet] = useState("");
       const [filterNum, setFilterNum] = useState("");
+      const [showManual, setShowManual] = useState(false);
+      const [mName, setMName] = useState("");
+      const [mSet, setMSet] = useState("");
+      const [mNum, setMNum] = useState("");
+      const [mType, setMType] = useState("");
+      const [mLang, setMLang] = useState("it");
       const debounceRef = useRef(null);
       const recognizerRef = useRef(null);
 
@@ -419,6 +425,33 @@
 
       function pickCard(card) {
         onFound(card);
+      }
+
+      // Inserimento manuale (fallback quando Scryfall non trova la carta)
+      function openManual() {
+        setMName(manualName || ""); setMSet(""); setMNum(""); setMType(""); setMLang("it");
+        setShowManual(true);
+      }
+      function submitManual() {
+        if (!mName.trim()) return;
+        const fake = {
+          id: "manual-" + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
+          name: mName.trim(),
+          printed_name: mName.trim(),
+          set_name: mSet.trim() || "Inserita a mano",
+          set: mSet.trim() ? mSet.trim().toLowerCase().replace(/\s+/g,'').slice(0,12) : "manual",
+          collector_number: mNum.trim() || "—",
+          type_line: mType.trim() || "",
+          rarity: "",
+          mana_cost: "",
+          colors: [],
+          legalities: {},
+          prices: {},
+          lang: mLang,
+          released_at: "",
+          manual: true,
+        };
+        onFound(fake);
       }
 
       return (
@@ -534,6 +567,52 @@
             {/* Status errore */}
             {results.length===0 && status && !scanning && (
               <div style={{textAlign:"center", fontSize:12, color:"#94a3b8", marginTop:10}}>{status}</div>
+            )}
+
+            {/* Pulsante inserimento manuale: appare quando la ricerca non trova nulla */}
+            {!scanning && !showManual && results.length===0 && manualName.trim().length>0 && status && status.indexOf("Nessuna")===0 && (
+              <button style={{...S.btnGhost, width:"100%", marginTop:10, padding:10}} onClick={openManual}>
+                ➕ Inserisci a mano (carta non trovata)
+              </button>
+            )}
+
+            {/* Form inserimento manuale */}
+            {showManual && (
+              <div style={{marginTop:12, background:"#0e0c16", border:"1px solid #2d2b3e", borderRadius:10, padding:14}} className="fade-in">
+                <div style={{fontSize:13, fontWeight:700, marginBottom:10}}>✍️ Inserimento manuale</div>
+                <div style={{fontSize:11, color:"#64748b", marginBottom:12}}>Per carte non ancora presenti su Scryfall. Il prezzo sarà N/D.</div>
+
+                <label style={S.lbl}>Nome carta *</label>
+                <input style={{...S.inp, width:"100%", marginBottom:10}} placeholder="Es. Dominio Robot"
+                  value={mName} onChange={e=>setMName(e.target.value)} autoFocus />
+
+                <label style={S.lbl}>Tipo</label>
+                <input style={{...S.inp, width:"100%", marginBottom:10}} placeholder="Es. Incantesimo — Progetto"
+                  value={mType} onChange={e=>setMType(e.target.value)} />
+
+                <div style={{display:"flex", gap:8, marginBottom:10}}>
+                  <div style={{flex:1}}>
+                    <label style={S.lbl}>Set / espansione</label>
+                    <input style={{...S.inp, width:"100%"}} placeholder="Es. Marvel"
+                      value={mSet} onChange={e=>setMSet(e.target.value)} />
+                  </div>
+                  <div style={{width:90}}>
+                    <label style={S.lbl}>N° carta</label>
+                    <input style={{...S.inp, width:"100%"}} placeholder="111"
+                      value={mNum} onChange={e=>setMNum(e.target.value)} />
+                  </div>
+                </div>
+
+                <label style={S.lbl}>Lingua</label>
+                <select style={{...S.sel, width:"100%", marginBottom:14}} value={mLang} onChange={e=>setMLang(e.target.value)}>
+                  {LANG_LIST.map(l => <option key={l} value={l}>{LANG_NAMES[l] || l.toUpperCase()}</option>)}
+                </select>
+
+                <div style={{display:"flex", gap:8}}>
+                  <button style={{...S.btnP, flex:1, padding:11}} onClick={submitManual} disabled={!mName.trim()}>Continua</button>
+                  <button style={{...S.btnGhost, flex:1}} onClick={()=>setShowManual(false)}>Annulla</button>
+                </div>
+              </div>
             )}
           </div>
         </div>
