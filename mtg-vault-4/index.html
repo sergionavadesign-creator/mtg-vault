@@ -25,7 +25,7 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useRef, useCallback, useEffect } = React;
+    const { useState, useRef, useCallback, useEffect, useMemo } = React;
 
     const FORMATS = ["Standard","Pioneer","Modern","Legacy","Vintage","Commander","Pauper"];
     const FORMAT_COLORS = {
@@ -646,6 +646,27 @@
       const deckTotal = deckCards.reduce((s,c) => s+(c.qty||1), 0);
       const myDecks = data.decks.filter(d => d.ownerId===activeProfileId);
 
+      // Mappa nome Oracle (invariante tra lingue) -> quantità totale posseduta,
+      // ricalcolata ad ogni render così il possesso è sempre aggiornato
+      const ownedNameMap = useMemo(() => {
+        const map = {};
+        collection.forEach(oc => {
+          const key = (oc.name||"").toLowerCase();
+          if (!key) return;
+          map[key] = (map[key]||0) + (oc.qty||1);
+        });
+        return map;
+      }, [collection]);
+
+      // Carte del mazzo con lo stato di possesso ricalcolato dal vivo
+      // (per le carte importate da Moxfield; le carte aggiunte manualmente
+      // dalla collezione sono per definizione possedute)
+      const deckCardsLive = useMemo(() => deckCards.map(c => {
+        if (c.owned === undefined) return c; // carte aggiunte manualmente dalla collezione: già possedute per definizione
+        const q = ownedNameMap[(c.name||"").toLowerCase()] || 0;
+        return { ...c, owned: q >= (c.qty||1), ownedQty: q };
+      }), [deckCards, ownedNameMap]);
+
       // AI Advisor
       async function runAdvisor() {
         if (!advisorDeck) return;
@@ -823,7 +844,8 @@
               image: sc ? cardImage(sc) : null,
               qty: e.quantity,
               owned: ownedQty >= e.quantity,
-              ownedQty
+              ownedQty,
+              imported: true
             };
           });
 
@@ -1237,21 +1259,21 @@
                       <div style={S.panel}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                           <div style={S.pt}>Mazzo — {deckTotal} carte</div>
-                          {deckCards.some(c=>c.owned!==undefined) && (
+                          {deckCardsLive.some(c=>c.owned!==undefined) && (
                             <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
                               <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
                               Solo mancanti
                             </label>
                           )}
                         </div>
-                        {deckCards.some(c=>c.owned!==undefined) && (
+                        {deckCardsLive.some(c=>c.owned!==undefined) && (
                           <div style={{display:"flex",gap:10,marginBottom:10,fontSize:11}}>
-                            <span style={{color:"#34d399"}}>✅ {deckCards.filter(c=>c.owned).length} possedute</span>
-                            <span style={{color:"#f87171"}}>❌ {deckCards.filter(c=>!c.owned).length} da cercare</span>
+                            <span style={{color:"#34d399"}}>✅ {deckCardsLive.filter(c=>c.owned).length} possedute</span>
+                            <span style={{color:"#f87171"}}>❌ {deckCardsLive.filter(c=>!c.owned).length} da cercare</span>
                           </div>
                         )}
-                        {deckCards.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte dalla collezione</div>}
-                        {deckViewMode==="list" && deckCards.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
+                        {deckCardsLive.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte dalla collezione</div>}
+                        {deckViewMode==="list" && deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
                           <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e"}}>
                             <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
                             {card.owned!==undefined && (
@@ -1267,7 +1289,7 @@
                         ))}
                         {deckViewMode==="grid" && (
                           <div style={S.miniGrid}>
-                            {deckCards.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
+                            {deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
                               <div key={card.id} style={S.miniTile}>
                                 {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
                                 <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":" ❌") : ""}</span>
