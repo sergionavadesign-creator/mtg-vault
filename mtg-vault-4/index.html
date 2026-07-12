@@ -510,6 +510,9 @@
       const [filterText, setFilterText] = useState("");
       const [filterFormat, setFilterFormat] = useState("All");
       const [selectedCard, setSelectedCard] = useState(null);
+      const [colView, setColView] = useState("grid"); // "grid" | "list" — vista collezione
+      const [deckViewMode, setDeckViewMode] = useState("list"); // "list" | "grid" — vista pannelli mazzo
+      const [pickerOpen, setPickerOpen] = useState(false); // tendina "aggiungi dalla collezione"
       const [deckName, setDeckName] = useState("");
       const [deckFormat, setDeckFormat] = useState("Commander");
       const [activeDeck, setActiveDeck] = useState(null);
@@ -794,11 +797,19 @@
             }
           }
 
+          // Somma le quantità possedute per nome Oracle (invariante tra lingue/edizioni:
+          // una Foresta italiana e un Forest inglese sono la stessa carta e si sommano)
+          const ownedByName = {};
+          collection.forEach(oc => {
+            const key = (oc.name||"").toLowerCase();
+            if (!key) return;
+            ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1);
+          });
+
           const deckCardsList = moxPreview.entries.map(e => {
             const sc = scryMap[(e.name||"").toLowerCase()];
-            const ownedCard = collection.find(oc =>
-              (sc && oc.scryfallId===sc.id) || oc.name.toLowerCase()===(e.name||"").toLowerCase());
-            const ownedQty = ownedCard ? ownedCard.qty : 0;
+            const canonicalName = (sc?.name || e.name || "").toLowerCase();
+            const ownedQty = ownedByName[canonicalName] || 0;
             return {
               id: crypto.randomUUID(),
               scryfallId: sc?.id || null,
@@ -848,6 +859,29 @@
           setPriceError(e.message || "Impossibile recuperare i prezzi.");
         }
         setPriceLoading(false);
+      }
+
+      function renderCardDetailBody(card) {
+        return (
+          <>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>{card.printed_name || card.name}</div>
+            <div style={S.dMeta}>{card.type}</div>
+            <div style={S.dMeta}>{card.set} · #{card.collectorNumber}</div>
+            <div style={S.dMeta}>Cond: <b>{CONDITION_LABELS[card.condition]}</b> · Qtà: <b>{card.qty}</b></div>
+            <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>{cardPrice(card)>0 ? "€"+(cardPrice(card)*card.qty).toFixed(2) : "N/D"}</b></div>
+            <div style={S.legGrid}>
+              {FORMATS.map(f=>(
+                <div key={f} style={{textAlign:"center",fontSize:10}}>
+                  <div>{cardLegality(card,f)}</div>
+                  <div style={{color:"#64748b"}}>{f.slice(0,4)}</div>
+                </div>
+              ))}
+            </div>
+            <button style={S.btnExplain} onClick={e=>{e.stopPropagation();explainCardFn(card);}}>💬 Spiega questa carta</button>
+            <button style={S.btnPrice} onClick={e=>{e.stopPropagation();findBestPrice(card);}}>🛒 Trova il prezzo migliore</button>
+            <button style={S.btnDel} onClick={()=>removeCard(card.id)}>🗑 Rimuovi</button>
+          </>
+        );
       }
 
       function renderAdvisor(text) {
@@ -995,6 +1029,12 @@
                     {FORMATS.map(f=><option key={f}>{f}</option>)}
                   </select>
                 </div>
+                <div style={{display:"flex", justifyContent:"flex-end"}}>
+                  <div style={S.viewToggle}>
+                    <button style={{...S.viewBtn,...(colView==="grid"?S.viewBtnOn:{})}} onClick={()=>setColView("grid")}>▦ Griglia</button>
+                    <button style={{...S.viewBtn,...(colView==="list"?S.viewBtnOn:{})}} onClick={()=>setColView("list")}>☰ Lista</button>
+                  </div>
+                </div>
 
                 {filteredCollection.length===0 && (
                   <div style={S.empty}>
@@ -1003,46 +1043,62 @@
                     <div style={{fontSize:12,marginTop:6,color:"#64748b"}}>Premi il pulsante qui sopra per aggiungerne una.</div>
                   </div>
                 )}
-                <div style={S.grid}>
-                  {filteredCollection.map(card => (
-                    <div key={card.id} style={S.tile} onClick={() => setSelectedCard(selectedCard?.id===card.id?null:card)}>
-                      {card.image
-                        ? <img src={card.image} alt={card.name} style={S.tileImg}/>
-                        : <div style={S.tileNoImg}>{card.printed_name || card.name}</div>
-                      }
-                      <div style={S.tileBody}>
-                        <div style={S.tileName}>{card.printed_name || card.name}</div>
-                        <div style={S.tileMeta}>{card.condition}</div>
-                        <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:6}}>€{cardPrice(card).toFixed(2)}</div>
-                        <div style={S.qtyRow} onClick={e=>e.stopPropagation()}>
-                          <button style={S.qtyBtn} onClick={()=>updateQty(card.id,-1)}>−</button>
-                          <span style={S.qtyCnt}>{card.qty}</span>
-                          <button style={S.qtyBtn} onClick={()=>updateQty(card.id,+1)}>+</button>
-                        </div>
-                      </div>
-                      {selectedCard?.id===card.id && (
-                        <div style={S.detail} onClick={e=>e.stopPropagation()}>
-                          <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>{card.printed_name || card.name}</div>
-                          <div style={S.dMeta}>{card.type}</div>
-                          <div style={S.dMeta}>{card.set} · #{card.collectorNumber}</div>
-                          <div style={S.dMeta}>Cond: <b>{CONDITION_LABELS[card.condition]}</b> · Qtà: <b>{card.qty}</b></div>
-                          <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>{cardPrice(card)>0 ? "€"+(cardPrice(card)*card.qty).toFixed(2) : "N/D"}</b></div>
-                          <div style={S.legGrid}>
-                            {FORMATS.map(f=>(
-                              <div key={f} style={{textAlign:"center",fontSize:10}}>
-                                <div>{cardLegality(card,f)}</div>
-                                <div style={{color:"#64748b"}}>{f.slice(0,4)}</div>
-                              </div>
-                            ))}
+                {colView==="grid" && (
+                  <div style={S.grid}>
+                    {filteredCollection.map(card => (
+                      <div key={card.id} style={S.tile} onClick={() => setSelectedCard(selectedCard?.id===card.id?null:card)}>
+                        {card.image
+                          ? <img src={card.image} alt={card.name} style={S.tileImg}/>
+                          : <div style={S.tileNoImg}>{card.printed_name || card.name}</div>
+                        }
+                        <div style={S.tileBody}>
+                          <div style={S.tileName}>{card.printed_name || card.name}</div>
+                          <div style={S.tileMeta}>{card.condition}</div>
+                          <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:6}}>€{cardPrice(card).toFixed(2)}</div>
+                          <div style={S.qtyRow} onClick={e=>e.stopPropagation()}>
+                            <button style={S.qtyBtn} onClick={()=>updateQty(card.id,-1)}>−</button>
+                            <span style={S.qtyCnt}>{card.qty}</span>
+                            <button style={S.qtyBtn} onClick={()=>updateQty(card.id,+1)}>+</button>
                           </div>
-                          <button style={S.btnExplain} onClick={e=>{e.stopPropagation();explainCardFn(card);}}>💬 Spiega questa carta</button>
-                          <button style={S.btnPrice} onClick={e=>{e.stopPropagation();findBestPrice(card);}}>🛒 Trova il prezzo migliore</button>
-                          <button style={S.btnDel} onClick={()=>removeCard(card.id)}>🗑 Rimuovi</button>
                         </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                        {selectedCard?.id===card.id && (
+                          <div style={S.detail} onClick={e=>e.stopPropagation()}>
+                            {renderCardDetailBody(card)}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {colView==="list" && (
+                  <div style={S.listWrap}>
+                    {filteredCollection.map(card => (
+                      <div key={card.id}>
+                        <div style={S.listRow} onClick={() => setSelectedCard(selectedCard?.id===card.id?null:card)}>
+                          {card.image
+                            ? <img src={card.image} alt={card.name} style={S.listThumb}/>
+                            : <div style={S.listThumbPlaceholder}>🃏</div>
+                          }
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={S.listName}>{card.printed_name || card.name}</div>
+                            <div style={S.listMeta}>{card.set} · {card.condition}</div>
+                          </div>
+                          <div style={{fontSize:13,fontWeight:700,color:"#f59e0b",flexShrink:0}}>€{cardPrice(card).toFixed(2)}</div>
+                          <div style={S.qtyRow} onClick={e=>e.stopPropagation()}>
+                            <button style={S.qtyBtn} onClick={()=>updateQty(card.id,-1)}>−</button>
+                            <span style={S.qtyCnt}>{card.qty}</span>
+                            <button style={S.qtyBtn} onClick={()=>updateQty(card.id,+1)}>+</button>
+                          </div>
+                        </div>
+                        {selectedCard?.id===card.id && (
+                          <div style={S.listDetail} onClick={e=>e.stopPropagation()}>
+                            {renderCardDetailBody(card)}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1125,33 +1181,62 @@
                 )}
                 {deckView==="build" && currentDeck && (
                   <div>
-                    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+                    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10,flexWrap:"wrap"}}>
                       <button style={S.btnGhost} onClick={()=>setDeckView("list")}>← Mazzi</button>
                       <span style={{fontSize:18,fontWeight:700}}>{currentDeck.name}</span>
                       <span style={{fontSize:12,fontWeight:600,color:FORMAT_COLORS[currentDeck.format]}}>{currentDeck.format}</span>
                       <span style={{marginLeft:"auto",background:"#1e1b2e",padding:"4px 12px",borderRadius:20,fontSize:12}}>{deckTotal} carte</span>
                     </div>
-                    <div style={S.builder}>
-                      <div style={{...S.panel,flex:1}}>
-                        <div style={S.pt}>Collezione — {activeProfile?.name}</div>
-                        <input style={{...S.inp,width:"100%",marginBottom:10}} placeholder="Filtra…" value={deckFilter} onChange={e=>setDeckFilter(e.target.value)} />
-                        <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:380,overflowY:"auto"}}>
-                          {collection.filter(c=>!deckFilter||(c.name.toLowerCase().includes(deckFilter.toLowerCase()) || (c.printed_name||"").toLowerCase().includes(deckFilter.toLowerCase()))).map(card=>{
-                            const legal=card.legalities?.[currentDeck.format.toLowerCase()]==="legal";
-                            return (
-                              <div key={card.id} style={{...S.pickItem,opacity:legal?1:0.35}}>
-                                <span style={{flex:1,fontSize:12}}>{card.printed_name || card.name}</span>
-                                <span style={{fontSize:11}}>{legal?"✅":"🚫"}</span>
-                                <button style={S.btnMini} onClick={()=>addToDeck(currentDeck.id,card)} disabled={!legal}>+</button>
-                              </div>
-                            );
-                          })}
-                          {collection.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte alla collezione prima</div>}
-                        </div>
+                    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:14}}>
+                      <div style={S.viewToggle}>
+                        <button style={{...S.viewBtn,...(deckViewMode==="list"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("list")}>☰ Lista</button>
+                        <button style={{...S.viewBtn,...(deckViewMode==="grid"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("grid")}>▦ Anteprima</button>
                       </div>
-                      <div style={{...S.panel,flex:1}}>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                      <div style={S.panel}>
+                        <div style={S.pickerHeader} onClick={()=>setPickerOpen(o=>!o)}>
+                          <div style={S.pt}>🃏 Aggiungi dalla collezione — {activeProfile?.name} ({collection.length})</div>
+                          <span style={{fontSize:14,color:"#94a3b8"}}>{pickerOpen?"▾ chiudi":"▸ apri"}</span>
+                        </div>
+                        {pickerOpen && (
+                          <div className="fade-in" style={{marginTop:12}}>
+                            <input style={{...S.inp,width:"100%",marginBottom:10}} placeholder="Filtra…" value={deckFilter} onChange={e=>setDeckFilter(e.target.value)} autoFocus />
+                            {deckViewMode==="list" && (
+                              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:380,overflowY:"auto"}}>
+                                {collection.filter(c=>!deckFilter||(c.name.toLowerCase().includes(deckFilter.toLowerCase()) || (c.printed_name||"").toLowerCase().includes(deckFilter.toLowerCase()))).map(card=>{
+                                  const legal=card.legalities?.[currentDeck.format.toLowerCase()]==="legal";
+                                  return (
+                                    <div key={card.id} style={{...S.pickItem,opacity:legal?1:0.35}}>
+                                      <span style={{flex:1,fontSize:12}}>{card.printed_name || card.name}</span>
+                                      <span style={{fontSize:11}}>{legal?"✅":"🚫"}</span>
+                                      <button style={S.btnMini} onClick={()=>addToDeck(currentDeck.id,card)} disabled={!legal}>+</button>
+                                    </div>
+                                  );
+                                })}
+                                {collection.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte alla collezione prima</div>}
+                              </div>
+                            )}
+                            {deckViewMode==="grid" && (
+                              <div style={S.miniGrid}>
+                                {collection.filter(c=>!deckFilter||(c.name.toLowerCase().includes(deckFilter.toLowerCase()) || (c.printed_name||"").toLowerCase().includes(deckFilter.toLowerCase()))).map(card=>{
+                                  const legal=card.legalities?.[currentDeck.format.toLowerCase()]==="legal";
+                                  return (
+                                    <div key={card.id} style={{...S.miniTile,opacity:legal?1:0.4}}>
+                                      {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
+                                      <button style={S.miniBtn} onClick={()=>addToDeck(currentDeck.id,card)} disabled={!legal}>{legal?"+ Aggiungi":"🚫"}</button>
+                                    </div>
+                                  );
+                                })}
+                                {collection.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte alla collezione prima</div>}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <div style={S.panel}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                          <div style={S.pt}>Nel mazzo</div>
+                          <div style={S.pt}>Mazzo — {deckTotal} carte</div>
                           {deckCards.some(c=>c.owned!==undefined) && (
                             <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
                               <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
@@ -1166,7 +1251,7 @@
                           </div>
                         )}
                         {deckCards.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte dalla collezione</div>}
-                        {deckCards.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
+                        {deckViewMode==="list" && deckCards.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
                           <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e"}}>
                             <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
                             {card.owned!==undefined && (
@@ -1180,6 +1265,17 @@
                             <button style={S.btnMini} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>×</button>
                           </div>
                         ))}
+                        {deckViewMode==="grid" && (
+                          <div style={S.miniGrid}>
+                            {deckCards.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
+                              <div key={card.id} style={S.miniTile}>
+                                {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
+                                <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":" ❌") : ""}</span>
+                                <button style={S.miniBtn} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>× Rimuovi</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         {deckCards.length>0 && (
                           <div style={{marginTop:12,padding:10,background:"#0e0c16",borderRadius:7,fontSize:12,display:"flex",justifyContent:"space-between"}}>
                             <span>{deckTotal} carte</span>
@@ -1365,6 +1461,26 @@
       detail:{position:"absolute",top:"100%",left:0,zIndex:50,width:220,background:"#1a1828",border:"1px solid #4a4570",borderRadius:10,padding:12,boxShadow:"0 8px 30px rgba(0,0,0,.8)",marginTop:4},
       dMeta:{fontSize:11,color:"#94a3b8",marginBottom:3},
       legGrid:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:4,margin:"8px 0"},
+      // View toggle (griglia/lista)
+      viewToggle:{display:"flex",border:"1px solid #2d2b3e",borderRadius:7,overflow:"hidden",flexShrink:0},
+      viewBtn:{padding:"8px 12px",background:"#0e0c16",border:"none",color:"#64748b",cursor:"pointer",fontSize:14,lineHeight:1},
+      viewBtnOn:{background:"#f59e0b",color:"#0a0a0f"},
+      pickerHeader:{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"},
+      // Lista compatta
+      listWrap:{display:"flex",flexDirection:"column",gap:6},
+      listRow:{display:"flex",alignItems:"center",gap:10,padding:8,background:"#12101a",border:"1px solid #1e1b2e",borderRadius:9,cursor:"pointer"},
+      listThumb:{width:36,height:50,objectFit:"cover",borderRadius:4,flexShrink:0},
+      listThumbPlaceholder:{width:36,height:50,background:"#1e1b2e",borderRadius:4,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0},
+      listName:{fontSize:13,fontWeight:600,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
+      listMeta:{fontSize:11,color:"#64748b",marginTop:2},
+      listDetail:{background:"#1a1828",border:"1px solid #4a4570",borderRadius:10,padding:12,marginTop:4,marginBottom:2},
+      // Mini card grid (usata nei pannelli mazzo)
+      miniGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))",gap:8,maxHeight:400,overflowY:"auto"},
+      miniTile:{background:"#0e0c16",border:"1px solid #1e1b2e",borderRadius:8,overflow:"hidden",position:"relative"},
+      miniImg:{width:"100%",display:"block",borderRadius:"8px 8px 0 0"},
+      miniNoImg:{padding:6,textAlign:"center",fontSize:9,color:"#64748b",background:"#1e1b2e",minHeight:60,display:"flex",alignItems:"center",justifyContent:"center"},
+      miniQty:{position:"absolute",top:4,left:4,background:"rgba(10,10,15,.85)",color:"#f59e0b",fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:10},
+      miniBtn:{width:"100%",padding:"4px 0",background:"#1e1b2e",border:"none",color:"#f8fafc",cursor:"pointer",fontSize:13},
       // Decks
       deckGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12},
       deckCard:{background:"#12101a",border:"1px solid #1e1b2e",borderRadius:10,padding:16},
