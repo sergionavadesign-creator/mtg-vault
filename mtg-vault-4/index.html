@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0a0a0f" />
-  <title>MTG Vault</title>
+  <title>MyMagic</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -221,6 +221,21 @@
       return l==="legal"?"✅":l==="banned"?"🚫":l==="restricted"?"⚠️":"❌";
     };
 
+    // Alias multilingua delle terre base: garantisce il riconoscimento
+    // (es. Palude = Swamp) anche se il nome salvato non è quello inglese Oracle
+    const BASIC_LAND_ALIASES = {
+      "foresta":"forest", "wald":"forest", "forêt":"forest", "bosque":"forest", "floresta":"forest", "森":"forest",
+      "isola":"island", "insel":"island", "île":"island", "isla":"island", "ilha":"island", "島":"island",
+      "montagna":"mountain", "berg":"mountain", "montagne":"mountain", "montaña":"mountain", "montanha":"mountain", "山":"mountain",
+      "palude":"swamp", "sumpf":"swamp", "marais":"swamp", "pantano":"swamp", "沼":"swamp",
+      "pianura":"plains", "ebene":"plains", "plaine":"plains", "llanura":"plains", "planície":"plains", "planicie":"plains", "平地":"plains",
+      "distese":"wastes", "einöde":"wastes", "étendues":"wastes",
+    };
+    function canonicalCardName(name) {
+      const key = (name||"").trim().toLowerCase();
+      return BASIC_LAND_ALIASES[key] || key;
+    }
+
     // ── PROFILE SCREEN ───────────────────────────────────────
     function ProfileScreen({ data, onSelect, onCreate, onDelete }) {
       const [creating, setCreating] = useState(false);
@@ -236,8 +251,8 @@
       return (
         <div style={S.psWrap} className="fade-in">
           <div style={S.psLogo}>
-            <span style={S.psGlyph}>⬡</span>
-            <div style={S.psTitle}>MTG Vault</div>
+            <span style={S.psGlyph}>✦</span>
+            <div style={S.psTitle}>MyMagic</div>
             <div style={S.psSub}>Chi sta giocando?</div>
           </div>
 
@@ -636,6 +651,18 @@
         await saveDeck(deck);
         persist(u);
       }
+      async function toggleCommander(deckId, cardId) {
+        const u = { ...data };
+        const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
+        const target = deck.cards.find(c => c.id===cardId); if (!target) return;
+        const makingCommander = !target.isCommander;
+        deck.cards = deck.cards.map(c => ({
+          ...c,
+          isCommander: c.id===cardId ? makingCommander : false
+        }));
+        await saveDeck(deck);
+        persist(u);
+      }
       async function handleDeleteDeck(deckId) {
         await deleteDeck(deckId);
         persist({ ...data, decks: data.decks.filter(d => d.id!==deckId) });
@@ -646,14 +673,13 @@
       const deckTotal = deckCards.reduce((s,c) => s+(c.qty||1), 0);
       const myDecks = data.decks.filter(d => d.ownerId===activeProfileId);
 
-      // Mappa nome Oracle (invariante tra lingue) -> quantità totale posseduta,
+      // Mappa nome canonico (invariante tra lingue, con alias terre base) -> quantità totale posseduta,
       // ricalcolata ad ogni render così il possesso è sempre aggiornato
       const ownedNameMap = useMemo(() => {
         const map = {};
         collection.forEach(oc => {
-          const key = (oc.name||"").toLowerCase();
-          if (!key) return;
-          map[key] = (map[key]||0) + (oc.qty||1);
+          const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
+          keys.forEach(key => { map[key] = (map[key]||0) + (oc.qty||1); });
         });
         return map;
       }, [collection]);
@@ -661,11 +687,14 @@
       // Carte del mazzo con lo stato di possesso ricalcolato dal vivo
       // (per le carte importate da Moxfield; le carte aggiunte manualmente
       // dalla collezione sono per definizione possedute)
-      const deckCardsLive = useMemo(() => deckCards.map(c => {
-        if (c.owned === undefined) return c; // carte aggiunte manualmente dalla collezione: già possedute per definizione
-        const q = ownedNameMap[(c.name||"").toLowerCase()] || 0;
-        return { ...c, owned: q >= (c.qty||1), ownedQty: q };
-      }), [deckCards, ownedNameMap]);
+      const deckCardsLive = useMemo(() => {
+        const withOwnership = deckCards.map(c => {
+          if (c.owned === undefined) return c; // carte aggiunte manualmente dalla collezione: già possedute per definizione
+          const q = ownedNameMap[canonicalCardName(c.name)] || 0;
+          return { ...c, owned: q >= (c.qty||1), ownedQty: q };
+        });
+        return [...withOwnership].sort((a,b) => (b.isCommander?1:0) - (a.isCommander?1:0));
+      }, [deckCards, ownedNameMap]);
 
       // AI Advisor
       async function runAdvisor() {
@@ -818,18 +847,17 @@
             }
           }
 
-          // Somma le quantità possedute per nome Oracle (invariante tra lingue/edizioni:
-          // una Foresta italiana e un Forest inglese sono la stessa carta e si sommano)
+          // Somma le quantità possedute per nome canonico (invariante tra lingue/edizioni,
+          // con alias terre base: una Foresta italiana e un Forest inglese sono la stessa carta)
           const ownedByName = {};
           collection.forEach(oc => {
-            const key = (oc.name||"").toLowerCase();
-            if (!key) return;
-            ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1);
+            const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
+            keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
           });
 
           const deckCardsList = moxPreview.entries.map(e => {
             const sc = scryMap[(e.name||"").toLowerCase()];
-            const canonicalName = (sc?.name || e.name || "").toLowerCase();
+            const canonicalName = canonicalCardName(sc?.name || e.name || "");
             const ownedQty = ownedByName[canonicalName] || 0;
             return {
               id: crypto.randomUUID(),
@@ -845,7 +873,8 @@
               qty: e.quantity,
               owned: ownedQty >= e.quantity,
               ownedQty,
-              imported: true
+              imported: true,
+              isCommander: e.board === "commanders"
             };
           });
 
@@ -1009,9 +1038,9 @@
           <header style={S.header}>
             <div style={S.hTop}>
               <div style={S.logo}>
-                <span style={S.logoIcon}>⬡</span>
+                <span style={S.logoIcon}>✦</span>
                 <div>
-                  <div style={S.logoTitle}>MTG Vault</div>
+                  <div style={S.logoTitle}>MyMagic</div>
                   <div style={S.logoSub}>{activeProfile?.avatar} {activeProfile?.name}</div>
                 </div>
               </div>
@@ -1258,7 +1287,7 @@
                       </div>
                       <div style={S.panel}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                          <div style={S.pt}>Mazzo — {deckTotal} carte</div>
+                          <div style={S.pt}>Mazzo — {deckTotal} carte ({deckCardsLive.length} titoli)</div>
                           {deckCardsLive.some(c=>c.owned!==undefined) && (
                             <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
                               <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
@@ -1267,22 +1296,31 @@
                           )}
                         </div>
                         {deckCardsLive.some(c=>c.owned!==undefined) && (
-                          <div style={{display:"flex",gap:10,marginBottom:10,fontSize:11}}>
-                            <span style={{color:"#34d399"}}>✅ {deckCardsLive.filter(c=>c.owned).length} possedute</span>
-                            <span style={{color:"#f87171"}}>❌ {deckCardsLive.filter(c=>!c.owned).length} da cercare</span>
+                          <div style={{display:"flex",flexDirection:"column",gap:2,marginBottom:10,fontSize:11}}>
+                            <div style={{display:"flex",gap:10}}>
+                              <span style={{color:"#34d399"}}>✅ {deckCardsLive.filter(c=>c.owned).length} titoli posseduti</span>
+                              <span style={{color:"#f87171"}}>❌ {deckCardsLive.filter(c=>!c.owned).length} titoli da cercare</span>
+                            </div>
+                            <div style={{color:"#64748b"}}>
+                              ({deckCardsLive.filter(c=>c.owned).reduce((s,c)=>s+(c.qty||1),0)} carte possedute su {deckTotal} totali)
+                            </div>
                           </div>
                         )}
                         {deckCardsLive.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte dalla collezione</div>}
                         {deckViewMode==="list" && deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
-                          <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e"}}>
+                          <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e",...(card.isCommander?{background:"#241a08",borderRadius:6,paddingLeft:6}:{})}}>
                             <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
                             {card.owned!==undefined && (
                               <span title={card.owned?"Posseduta":"Da cercare"} style={{fontSize:11}}>{card.owned?"✅":"❌"}</span>
                             )}
-                            <span style={{flex:1,fontSize:12}}>{card.printed_name || card.name}</span>
+                            {card.isCommander && <span title="Comandante" style={{fontSize:13}}>👑</span>}
+                            <span style={{flex:1,fontSize:12,fontWeight:card.isCommander?700:400}}>{card.printed_name || card.name}</span>
                             <span style={{fontSize:10,color:"#64748b",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.type?.split("—")[0]}</span>
                             {card.owned===false && (
                               <button style={S.btnMini} title="Trova il prezzo migliore" onClick={()=>findBestPrice(card)}>🛒</button>
+                            )}
+                            {currentDeck.format==="Commander" && (
+                              <button style={{...S.btnMini,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} title="Designa come comandante" onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑</button>
                             )}
                             <button style={S.btnMini} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>×</button>
                           </div>
@@ -1290,9 +1328,13 @@
                         {deckViewMode==="grid" && (
                           <div style={S.miniGrid}>
                             {deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
-                              <div key={card.id} style={S.miniTile}>
+                              <div key={card.id} style={{...S.miniTile,...(card.isCommander?{border:"2px solid #f59e0b"}:{})}}>
                                 {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
+                                {card.isCommander && <span style={{...S.miniQty,left:"auto",right:4,background:"#f59e0b",color:"#0a0a0f"}}>👑</span>}
                                 <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":" ❌") : ""}</span>
+                                {currentDeck.format==="Commander" && (
+                                  <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑 {card.isCommander?"Rimuovi":"Designa"}</button>
+                                )}
                                 <button style={S.miniBtn} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>× Rimuovi</button>
                               </div>
                             ))}
