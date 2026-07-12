@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0a0a0f" />
-  <title>MyMagic</title>
+  <title>MTG Vault</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -20,8 +20,6 @@
     a { color: #34d399; }
     .fade-in { animation: fadeIn .25s ease; }
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-    .flip-in { animation: flipIn .32s ease; }
-    @keyframes flipIn { from { opacity:0; transform:perspective(900px) rotateY(85deg); } to { opacity:1; transform:perspective(900px) rotateY(0); } }
   </style>
 </head>
 <body>
@@ -42,9 +40,6 @@
     const SUPABASE_URL = "https://tjznhpseecbxitkivkqf.supabase.co";
     const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRqem5ocHNlZWNieGl0a2l2a3FmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NTg2MzQsImV4cCI6MjA5ODMzNDYzNH0.KzBEzJcGeUx9C7qb5hadsSqbUyMwjdShACCpeXor6h0";
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-
-    // Endpoint della Edge Function che fa da proxy sicuro verso l'AI (API key nascosta lato server)
-    const AI_ENDPOINT = SUPABASE_URL + "/functions/v1/ai-proxy";
 
     // Fallback localStorage durante configurazione
     function loadLocalData() {
@@ -68,7 +63,6 @@
               ...c, id: c.id, scryfallId: c.scryfall_id, set: c.set_name,
               setCode: c.set_code, collectorNumber: c.collector_number,
               manaCost: c.mana_cost, type: c.type_line, image: c.image, printed_name: c.printed_name||null,
-              synced: true,
             }))
           })),
           decks: (decks||[]).map(d => ({
@@ -108,11 +102,8 @@
           legalities: card.legalities, prices: card.prices, image: card.image,
           condition: card.condition, qty: card.qty
         };
-        const { error } = await sb.from("cards").upsert(row);
-        if (error) { console.error("saveCard error", error); window.__lastSaveError = (error.message||"") + " | code: " + (error.code||"") + " | details: " + (error.details||"") + " | hint: " + (error.hint||""); return false; }
-        window.__lastSaveError = null;
-        return true; // salvataggio confermato da Supabase
-      } catch(e) { console.error("saveCard error", e); window.__lastSaveError = String(e); return false; }
+        await sb.from("cards").upsert(row);
+      } catch(e) { console.error("saveCard error", e); }
     }
 
     async function deleteCard(id) {
@@ -144,77 +135,66 @@
     }
 
     // Cerca carte in italiano e inglese
-    // Trova i nomi inglesi (Oracle) a partire da un input in qualsiasi lingua
-    async function findOracleNames(q) {
-      const query = q.trim();
-      if (!query) return [];
-      const [fuzzy, itDirect] = await Promise.all([
-        fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(query)}`)
-          .then(r => r.ok ? r.json() : null).catch(() => null),
-        fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(query+" lang:it include:multilingual")}&unique=prints&order=released&limit=20`)
-          .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]),
-      ]);
-      const names = new Set();
-      if (fuzzy) names.add(fuzzy.name);
-      itDirect.forEach(c => names.add(c.name)); // .name è sempre Oracle inglese
-      return [...names];
-    }
-
-    // Costruisce la query Scryfall per un nome + filtri opzionali (lingua/anno/set/numero)
-    function buildPrintsQuery(name, f) {
-      let q = '!"'+name+'"';
-      q += (f && f.lang) ? ' lang:'+f.lang : ' lang:any';
-      if (f && f.year) q += ' year:'+f.year;
-      if (f && f.set)  q += ' set:'+f.set;
-      if (f && f.num)  q += ' cn:'+f.num;
-      return q;
-    }
-
-    // Scarica le stampe per i nomi dati, applicando i filtri nella query Scryfall
-    async function fetchPrints(names, f) {
-      if (!names || names.length === 0) return [];
-      const arrays = await Promise.all(
-        names.slice(0, 3).map(name =>
-          fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(buildPrintsQuery(name, f))}&unique=prints&order=released`)
-            .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[])
-        )
-      );
-      const prints = arrays.flat();
-      if (prints.length === 0) return [];
-
-      // Eredita prezzi dalle stampe inglesi dello stesso set
-      const enPrints = prints.filter(c => c.lang === 'en');
-      const priceBySet = {};
-      enPrints.forEach(c => { if (c.prices?.eur || c.prices?.usd) priceBySet[c.set] = c.prices; });
-      const refPrice = enPrints.find(c => c.prices?.eur || c.prices?.usd)?.prices;
-      const withPrices = prints.map(c => {
-        if (cardPrice(c) > 0) return c;
-        if (priceBySet[c.set]) return { ...c, prices: priceBySet[c.set] };
-        if (refPrice) return { ...c, prices: refPrice };
-        return c;
-      });
-
-      // Deduplica
-      const seen = new Set();
-      const deduped = withPrices.filter(c => {
-        const key = c.set+c.collector_number+c.lang;
-        if (seen.has(key)) return false;
-        seen.add(key); return true;
-      });
-
-      // Ordina: italiano, poi inglese, poi altre lingue
-      const italian = deduped.filter(c => c.lang === 'it');
-      const english = deduped.filter(c => c.lang === 'en');
-      const others = deduped.filter(c => c.lang !== 'it' && c.lang !== 'en');
-      return [...italian, ...english, ...others];
-    }
-
-    // Ricerca completa senza filtri (compatibilità)
     async function searchCardMulti(query) {
       try {
-        const names = await findOracleNames(query);
-        if (names.length === 0) return [];
-        return await fetchPrints(names, {});
+        const q = query.trim();
+        if (!q) return [];
+
+        // Cerca in parallelo: fuzzy inglese + ricerca diretta italiano
+        const [fuzzy, itDirect] = await Promise.all([
+          // Fuzzy inglese — trova nome Oracle anche da input italiano
+          fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(q)}`)
+            .then(r => r.ok ? r.json() : null).catch(() => null),
+          // Ricerca diretta per nome italiano (usa include:multilingual per cercare anche nei nomi stampati)
+          fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(q+" lang:it include:multilingual")}&unique=prints&order=released&limit=20`)
+            .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[]),
+        ]);
+
+        // Raccogli tutti i nomi inglesi trovati
+        const englishNames = new Set();
+        if (fuzzy) englishNames.add(fuzzy.name);
+        itDirect.forEach(c => englishNames.add(c.name)); // .name è sempre Oracle inglese
+
+        if (englishNames.size === 0) return [];
+
+        // Per ogni nome inglese, prendi TUTTE le stampe in tutte le lingue
+        const allPrintsArrays = await Promise.all(
+          [...englishNames].slice(0, 3).map(name =>
+            fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"'+name+'" lang:any')}&unique=prints&order=released&limit=40`)
+              .then(r => r.ok ? r.json() : {data:[]}).then(d => d.data||[]).catch(()=>[])
+          )
+        );
+
+        const prints = allPrintsArrays.flat();
+        if (prints.length === 0) return fuzzy ? [fuzzy] : [];
+
+        // Eredita prezzi dalle stampe inglesi dello stesso set
+        const enPrints = prints.filter(c => c.lang === 'en');
+        const priceBySet = {};
+        enPrints.forEach(c => { if (c.prices?.eur || c.prices?.usd) priceBySet[c.set] = c.prices; });
+        const refPrice = enPrints.find(c => c.prices?.eur || c.prices?.usd)?.prices;
+
+        const withPrices = prints.map(c => {
+          if (cardPrice(c) > 0) return c;
+          if (priceBySet[c.set]) return { ...c, prices: priceBySet[c.set] };
+          if (refPrice) return { ...c, prices: refPrice };
+          return c;
+        });
+
+        // Deduplica
+        const seen = new Set();
+        const deduped = withPrices.filter(c => {
+          const key = c.set+c.collector_number+c.lang;
+          if (seen.has(key)) return false;
+          seen.add(key); return true;
+        });
+
+        // Ordina: italiano prima, poi inglese, poi altre lingue
+        const italian = deduped.filter(c => c.lang === 'it');
+        const english = deduped.filter(c => c.lang === 'en');
+        const others = deduped.filter(c => c.lang !== 'it' && c.lang !== 'en');
+
+        return [...italian, ...english, ...others];
       } catch { return []; }
     }
 
@@ -256,8 +236,8 @@
       return (
         <div style={S.psWrap} className="fade-in">
           <div style={S.psLogo}>
-            <span style={S.psGlyph}>✦</span>
-            <div style={S.psTitle}>MyMagic</div>
+            <span style={S.psGlyph}>⬡</span>
+            <div style={S.psTitle}>MTG Vault</div>
             <div style={S.psSub}>Chi sta giocando?</div>
           </div>
 
@@ -312,50 +292,8 @@
       const [suggestions, setSuggestions] = useState([]); // autocomplete
       const [showSugg, setShowSugg] = useState(false);
       const [listening, setListening] = useState(false);
-      const [showFilters, setShowFilters] = useState(false);
-      const [oracleNames, setOracleNames] = useState([]);
-      const [filterLang, setFilterLang] = useState("");
-      const [filterYear, setFilterYear] = useState("");
-      const [filterSet, setFilterSet] = useState("");
-      const [filterNum, setFilterNum] = useState("");
-      const [showManual, setShowManual] = useState(false);
-      const [mName, setMName] = useState("");
-      const [mSet, setMSet] = useState("");
-      const [mNum, setMNum] = useState("");
-      const [mType, setMType] = useState("");
-      const [mLang, setMLang] = useState("it");
       const debounceRef = useRef(null);
       const recognizerRef = useRef(null);
-
-      const LANG_NAMES = {en:"🇬🇧 Inglese",it:"🇮🇹 Italiano",fr:"🇫🇷 Francese",de:"🇩🇪 Tedesco",es:"🇪🇸 Spagnolo",pt:"🇵🇹 Portoghese",ja:"🇯🇵 Giapponese",ko:"🇰🇷 Coreano",ru:"🇷🇺 Russo",zhs:"🇨🇳 Cinese sempl.",zht:"🇨🇳 Cinese trad."};
-      const LANG_LIST = ["it","en","fr","de","es","pt","ja","ko","ru","zhs","zht"];
-      const YEAR_LIST = (() => { const y=[]; for (let a=new Date().getFullYear(); a>=1993; a--) y.push(String(a)); return y; })();
-      // Set disponibili nei risultati correnti (codice + nome), per il menu set
-      const availSets = [...new Map(results.map(c => [c.set, {code:c.set, name:c.set_name}])).values()]
-        .sort((a,b)=> (a.name||"").localeCompare(b.name||""));
-      const anyFilter = filterLang || filterYear || filterSet || filterNum;
-
-      // Rifà la ricerca su Scryfall con i filtri (trova anche edizioni vecchie/rare)
-      async function reSearch(f) {
-        if (!oracleNames.length) return;
-        setScanning(true); setStatus("Cercando…");
-        const cards = await fetchPrints(oracleNames, f);
-        setResults(cards);
-        setStatus(cards.length ? `${cards.length} edizioni` : "Nessuna edizione con questi filtri.");
-        setScanning(false);
-      }
-      function changeFilter(patch) {
-        const f = { lang:filterLang, year:filterYear, set:filterSet, num:filterNum, ...patch };
-        if ("lang" in patch) setFilterLang(patch.lang);
-        if ("year" in patch) setFilterYear(patch.year);
-        if ("set" in patch) setFilterSet(patch.set);
-        if ("num" in patch) setFilterNum(patch.num);
-        reSearch(f);
-      }
-      function clearFilters() {
-        setFilterLang(""); setFilterYear(""); setFilterSet(""); setFilterNum("");
-        reSearch({});
-      }
 
       function startVoice() {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -412,11 +350,7 @@
         const q = (name || manualName).trim();
         if (!q) return;
         setScanning(true); setResults([]); setShowSugg(false); setStatus("Cercando…");
-        setFilterLang(""); setFilterYear(""); setFilterSet(""); setFilterNum(""); setShowFilters(false);
-        const names = await findOracleNames(q);
-        setOracleNames(names);
-        if (names.length === 0) { setStatus("Nessuna carta trovata. Controlla il nome."); setScanning(false); return; }
-        const cards = await fetchPrints(names, {});
+        const cards = await searchCardMulti(q);
         if (cards.length===1) { onFound(cards[0]); }
         else if (cards.length>1) { setResults(cards); setStatus(`${cards.length} edizioni trovate — scegli quella che hai:`); }
         else { setStatus("Nessuna carta trovata. Controlla il nome."); }
@@ -426,33 +360,6 @@
 
       function pickCard(card) {
         onFound(card);
-      }
-
-      // Inserimento manuale (fallback quando Scryfall non trova la carta)
-      function openManual() {
-        setMName(manualName || ""); setMSet(""); setMNum(""); setMType(""); setMLang("it");
-        setShowManual(true);
-      }
-      function submitManual() {
-        if (!mName.trim()) return;
-        const fake = {
-          id: "manual-" + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
-          name: mName.trim(),
-          printed_name: mName.trim(),
-          set_name: mSet.trim() || "Inserita a mano",
-          set: mSet.trim() ? mSet.trim().toLowerCase().replace(/\s+/g,'').slice(0,12) : "manual",
-          collector_number: mNum.trim() || "—",
-          type_line: mType.trim() || "",
-          rarity: "",
-          mana_cost: "",
-          colors: [],
-          legalities: {},
-          prices: {},
-          lang: mLang,
-          released_at: "",
-          manual: true,
-        };
-        onFound(fake);
       }
 
       return (
@@ -491,47 +398,9 @@
               )}
             </div>
 
-            {/* Barra filtri (dopo una ricerca) */}
-            {oracleNames.length>0 && (
-              <div style={{marginTop:10}}>
-                <div style={{display:"flex", alignItems:"center", gap:8}}>
-                  <div style={{fontSize:12, color:"#34d399", fontWeight:600, flex:1}}>
-                    {results.length} edizioni{anyFilter ? " (filtrate)" : ""}
-                  </div>
-                  <button style={{...S.btnGhost, background:anyFilter?"#1e1b2e":"transparent"}}
-                    onClick={()=>setShowFilters(v=>!v)}>
-                    ⚙️ Filtri {anyFilter ? "•" : ""}
-                  </button>
-                </div>
-                {showFilters && (
-                  <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}} className="fade-in">
-                    <div style={{display:"flex", gap:8}}>
-                      <select style={{...S.sel, flex:1}} value={filterLang} onChange={e=>changeFilter({lang:e.target.value})}>
-                        <option value="">Tutte le lingue</option>
-                        {LANG_LIST.map(l => <option key={l} value={l}>{LANG_NAMES[l] || l.toUpperCase()}</option>)}
-                      </select>
-                      <select style={{...S.sel, flex:1}} value={filterYear} onChange={e=>changeFilter({year:e.target.value})}>
-                        <option value="">Tutti gli anni</option>
-                        {YEAR_LIST.map(y => <option key={y} value={y}>{y}</option>)}
-                      </select>
-                    </div>
-                    <div style={{display:"flex", gap:8}}>
-                      <select style={{...S.sel, flex:1}} value={filterSet} onChange={e=>changeFilter({set:e.target.value})}>
-                        <option value="">Tutti i set</option>
-                        {availSets.map(s => <option key={s.code} value={s.code}>{s.name}</option>)}
-                      </select>
-                      <input style={{...S.inp, width:96}} type="text" inputMode="numeric" placeholder="N° carta"
-                        value={filterNum}
-                        onChange={e=>setFilterNum(e.target.value.replace(/[^0-9a-zA-Z]/g,''))}
-                        onKeyDown={e=>{ if(e.key==="Enter") changeFilter({num:filterNum}); }}
-                        onBlur={()=>{ if(filterNum!=="") changeFilter({num:filterNum}); }} />
-                    </div>
-                    {anyFilter && (
-                      <button style={{...S.btnGhost, alignSelf:"flex-start"}} onClick={clearFilters}>✕ Azzera filtri</button>
-                    )}
-                  </div>
-                )}
-              </div>
+            {/* Status quando ci sono risultati */}
+            {results.length>0 && (
+              <div style={{fontSize:12, color:"#34d399", margin:"10px 0 4px", fontWeight:600}}>{status}</div>
             )}
 
             {/* Lista risultati */}
@@ -568,52 +437,6 @@
             {/* Status errore */}
             {results.length===0 && status && !scanning && (
               <div style={{textAlign:"center", fontSize:12, color:"#94a3b8", marginTop:10}}>{status}</div>
-            )}
-
-            {/* Pulsante inserimento manuale: appare quando la ricerca non trova nulla */}
-            {!scanning && !showManual && results.length===0 && manualName.trim().length>0 && status && status.indexOf("Nessuna")===0 && (
-              <button style={{...S.btnGhost, width:"100%", marginTop:10, padding:10}} onClick={openManual}>
-                ➕ Inserisci a mano (carta non trovata)
-              </button>
-            )}
-
-            {/* Form inserimento manuale */}
-            {showManual && (
-              <div style={{marginTop:12, background:"#0e0c16", border:"1px solid #2d2b3e", borderRadius:10, padding:14}} className="fade-in">
-                <div style={{fontSize:13, fontWeight:700, marginBottom:10}}>✍️ Inserimento manuale</div>
-                <div style={{fontSize:11, color:"#64748b", marginBottom:12}}>Per carte non ancora presenti su Scryfall. Il prezzo sarà N/D.</div>
-
-                <label style={S.lbl}>Nome carta *</label>
-                <input style={{...S.inp, width:"100%", marginBottom:10}} placeholder="Es. Dominio Robot"
-                  value={mName} onChange={e=>setMName(e.target.value)} autoFocus />
-
-                <label style={S.lbl}>Tipo</label>
-                <input style={{...S.inp, width:"100%", marginBottom:10}} placeholder="Es. Incantesimo — Progetto"
-                  value={mType} onChange={e=>setMType(e.target.value)} />
-
-                <div style={{display:"flex", gap:8, marginBottom:10}}>
-                  <div style={{flex:1}}>
-                    <label style={S.lbl}>Set / espansione</label>
-                    <input style={{...S.inp, width:"100%"}} placeholder="Es. Marvel"
-                      value={mSet} onChange={e=>setMSet(e.target.value)} />
-                  </div>
-                  <div style={{width:90}}>
-                    <label style={S.lbl}>N° carta</label>
-                    <input style={{...S.inp, width:"100%"}} placeholder="111"
-                      value={mNum} onChange={e=>setMNum(e.target.value)} />
-                  </div>
-                </div>
-
-                <label style={S.lbl}>Lingua</label>
-                <select style={{...S.sel, width:"100%", marginBottom:14}} value={mLang} onChange={e=>setMLang(e.target.value)}>
-                  {LANG_LIST.map(l => <option key={l} value={l}>{LANG_NAMES[l] || l.toUpperCase()}</option>)}
-                </select>
-
-                <div style={{display:"flex", gap:8}}>
-                  <button style={{...S.btnP, flex:1, padding:11}} onClick={submitManual} disabled={!mName.trim()}>Continua</button>
-                  <button style={{...S.btnGhost, flex:1}} onClick={()=>setShowManual(false)}>Annulla</button>
-                </div>
-              </div>
             )}
           </div>
         </div>
@@ -706,6 +529,21 @@
       const [explainText, setExplainText] = useState(null);
       const [explaining, setExplaining] = useState(false);
 
+      // Import mazzo da Moxfield
+      const [moxUrl, setMoxUrl] = useState("");
+      const [moxLoading, setMoxLoading] = useState(false);
+      const [moxError, setMoxError] = useState("");
+      const [moxPreview, setMoxPreview] = useState(null); // { name, format, cards:[...] }
+      const [moxFormat, setMoxFormat] = useState("Commander");
+      const [moxImporting, setMoxImporting] = useState(false);
+      const [moxOnlyMissing, setMoxOnlyMissing] = useState(false);
+
+      // Trova il prezzo migliore di una carta
+      const [priceCard, setPriceCard] = useState(null);
+      const [priceInfo, setPriceInfo] = useState(null);
+      const [priceLoading, setPriceLoading] = useState(false);
+      const [priceError, setPriceError] = useState("");
+
       const persist = useCallback(d => { setData(d); saveLocalData(d); }, []);
 
       const activeProfile = data.profiles.find(p => p.id === activeProfileId);
@@ -728,19 +566,17 @@
       // Card management
       async function addCard(card, condition, qty) {
         const newCard = {
-          id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null,
+          id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null, printed_name:card.printed_name||null,
           set:card.set_name, setCode:card.set, collectorNumber:card.collector_number,
           rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[],
           type:card.type_line||"", legalities:card.legalities||{}, prices:card.prices||{},
           image:cardImage(card), condition, qty, addedAt:new Date().toISOString()
         };
-        const ok = await saveCard(newCard, activeProfileId);
-        newCard.synced = ok; // true = salvata su Supabase, false = solo locale (a rischio)
+        await saveCard(newCard, activeProfileId);
         const u = { ...data, profiles: data.profiles.map(p =>
           p.id===activeProfileId ? { ...p, cards: [...(p.cards||[]), newCard] } : p
         )};
         persist(u); setConfirmCard(null); setShowScan(false);
-        if (!ok) alert("⚠️ Non salvata sul database.\n\nERRORE ESATTO:\n" + (window.__lastSaveError || "(nessun dettaglio)"));
       }
 
       async function removeCard(id) {
@@ -824,8 +660,8 @@
           "Budget rigoroso: €"+budget+". Solo carte legali in "+deck.format+".";
 
         try {
-          const res = await fetch(AI_ENDPOINT, {
-            method:"POST", headers:{"Content-Type":"application/json", "Authorization":"Bearer "+SUPABASE_KEY},
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method:"POST", headers:{"Content-Type":"application/json"},
             body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content:prompt}] })
           });
           const d = await res.json();
@@ -839,15 +675,18 @@
         setExplainCard(card);
         setExplainText(null);
         setExplaining(true);
-        const prompt = "Sei un esperto di Magic: The Gathering. Spiega la carta \""+card.name+"\" (tipo: "+(card.type||"?")+") a un giocatore, per aiutarlo durante la partita.\n\n"+
-          "Rispondi in italiano, in modo BREVE e pratico. Usa ESATTAMENTE questo formato, con queste due sezioni e nient'altro:\n\n"+
-          "**Cosa fa**\n(2-3 frasi che spiegano l'effetto della carta)\n\n"+
-          "**Come e quando si usa**\n(2-3 frasi pratiche su quando giocarla)\n\n"+
-          "REGOLE FERREE: massimo 90 parole in totale. Nessuna introduzione tipo 'Assolutamente' o 'Ecco'. Nessun elenco puntato. Nessuna altra sezione (niente sinergie, niente pro/contro). Non ripetere nome, tipo, costo, set o rarità.";
+        const prompt = "Sei un esperto di Magic: The Gathering. Spiega in italiano questa carta:\n\n"+
+          "Nome: "+card.name+"\nTipo: "+card.type+"\nCosto mana: "+(card.manaCost||"N/A")+"\nSet: "+card.set+"\nRarità: "+card.rarity+"\n\n"+
+          "Spiega in italiano:\n"+
+          "1. **Cosa fa** (spiegazione semplice dell'effetto)\n"+
+          "2. **Come si usa** (quando e perché giocarla)\n"+
+          "3. **Sinergie** (con quali altri tipi di carte funziona bene)\n"+
+          "4. **Punti di forza e debolezza**\n\n"+
+          "Sii conciso ma completo. Linguaggio accessibile anche per chi non è esperto.";
 
         try {
-          const res = await fetch(AI_ENDPOINT, {
-            method:"POST", headers:{"Content-Type":"application/json", "Authorization":"Bearer "+SUPABASE_KEY},
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method:"POST", headers:{"Content-Type":"application/json"},
             body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:600, messages:[{role:"user",content:prompt}] })
           });
           const d = await res.json();
@@ -876,14 +715,139 @@
           "Rispetta le regole del formato "+buildFormat+" (numero carte, ban list, ecc.).";
 
         try {
-          const res = await fetch(AI_ENDPOINT, {
-            method:"POST", headers:{"Content-Type":"application/json", "Authorization":"Bearer "+SUPABASE_KEY},
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method:"POST", headers:{"Content-Type":"application/json"},
             body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content:prompt}] })
           });
           const d = await res.json();
           setBuildResult(d.content?.[0]?.text || "Nessuna risposta.");
         } catch { setBuildResult("Errore di connessione. Riprova."); }
         setBuilding(false);
+      }
+
+      // ── IMPORTA MAZZO DA MOXFIELD ─────────────────────────
+      function parseMoxfieldId(input) {
+        const s = (input||"").trim();
+        if (!s) return null;
+        const m = s.match(/moxfield\.com\/decks\/([^\/?#]+)/i);
+        if (m) return m[1];
+        // se l'utente incolla direttamente l'ID pubblico
+        if (!s.includes("/") && !s.includes(" ")) return s;
+        return null;
+      }
+
+      async function fetchMoxfieldDeck() {
+        setMoxError(""); setMoxPreview(null);
+        const publicId = parseMoxfieldId(moxUrl);
+        if (!publicId) { setMoxError("Incolla un link Moxfield valido (es. https://moxfield.com/decks/xxxxx)"); return; }
+        setMoxLoading(true);
+        try {
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/moxfield-proxy?id=${encodeURIComponent(publicId)}`, {
+            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+          });
+          const d = await r.json();
+          if (!r.ok || d.error) throw new Error(d.error || "Mazzo non trovato o non pubblico");
+
+          const boards = ["mainboard", "commanders", "companions"];
+          const entries = [];
+          boards.forEach(b => {
+            const board = d[b] || {};
+            Object.values(board).forEach(entry => {
+              const c = entry.card || {};
+              entries.push({
+                name: c.name || entry.name,
+                quantity: entry.quantity || 1,
+                scryfallId: c.scryfall_id || c.scryfallId || null,
+                board: b
+              });
+            });
+          });
+          if (entries.length === 0) throw new Error("Il mazzo sembra vuoto o non pubblico.");
+
+          const formatMap = { commander:"Commander", standard:"Standard", pioneer:"Pioneer", modern:"Modern", legacy:"Legacy", vintage:"Vintage", pauper:"Pauper" };
+          const guessedFormat = formatMap[(d.format||"").toLowerCase()] || "Commander";
+          setMoxFormat(guessedFormat);
+          setMoxPreview({ name: d.name || "Mazzo importato", entries, cardCount: entries.reduce((s,e)=>s+e.quantity,0) });
+        } catch(e) {
+          setMoxError(e.message || "Errore nel recupero del mazzo da Moxfield.");
+        }
+        setMoxLoading(false);
+      }
+
+      async function confirmMoxfieldImport() {
+        if (!moxPreview) return;
+        setMoxImporting(true);
+        try {
+          // Recupera i dati completi da Scryfall in blocchi da 75 (batch collection endpoint)
+          const identifiers = moxPreview.entries.map(e => e.scryfallId ? { id: e.scryfallId } : { name: e.name });
+          const chunks = [];
+          for (let i=0; i<identifiers.length; i+=75) chunks.push(identifiers.slice(i,i+75));
+          const scryMap = {}; // nome lowercase -> card scryfall
+          for (const chunk of chunks) {
+            const res = await fetch("https://api.scryfall.com/cards/collection", {
+              method:"POST", headers:{"Content-Type":"application/json"},
+              body: JSON.stringify({ identifiers: chunk })
+            });
+            if (res.ok) {
+              const dd = await res.json();
+              (dd.data||[]).forEach(c => { scryMap[c.name.toLowerCase()] = c; });
+            }
+          }
+
+          const deckCardsList = moxPreview.entries.map(e => {
+            const sc = scryMap[(e.name||"").toLowerCase()];
+            const ownedCard = collection.find(oc =>
+              (sc && oc.scryfallId===sc.id) || oc.name.toLowerCase()===(e.name||"").toLowerCase());
+            const ownedQty = ownedCard ? ownedCard.qty : 0;
+            return {
+              id: crypto.randomUUID(),
+              scryfallId: sc?.id || null,
+              name: sc?.name || e.name,
+              printed_name: null,
+              set: sc?.set_name || "", setCode: sc?.set || "",
+              collectorNumber: sc?.collector_number || "",
+              rarity: sc?.rarity || "",
+              manaCost: sc?.mana_cost || "", colors: sc?.colors || [],
+              type: sc?.type_line || "", legalities: sc?.legalities || {}, prices: sc?.prices || {},
+              image: sc ? cardImage(sc) : null,
+              qty: e.quantity,
+              owned: ownedQty >= e.quantity,
+              ownedQty
+            };
+          });
+
+          const deck = { id: crypto.randomUUID(), name: moxPreview.name, format: moxFormat, cards: deckCardsList, ownerId: activeProfileId };
+          await saveDeck(deck);
+          persist({ ...data, decks: [...data.decks, deck] });
+          setMoxPreview(null); setMoxUrl(""); setActiveDeck(deck.id); setDeckView("build");
+        } catch(e) {
+          setMoxError("Errore durante l'importazione. Riprova.");
+        }
+        setMoxImporting(false);
+      }
+
+      // ── TROVA IL PREZZO MIGLIORE ──────────────────────────
+      async function findBestPrice(card) {
+        setPriceCard(card); setPriceInfo(null); setPriceError(""); setPriceLoading(true);
+        try {
+          let c = null;
+          if (card.scryfallId) {
+            const r = await fetch(`https://api.scryfall.com/cards/${card.scryfallId}`);
+            if (r.ok) c = await r.json();
+          }
+          if (!c) {
+            const r2 = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
+            if (r2.ok) c = await r2.json();
+          }
+          if (!c) throw new Error("Carta non trovata su Scryfall.");
+          setPriceInfo({
+            prices: c.prices || {},
+            purchase_uris: c.purchase_uris || {}
+          });
+        } catch(e) {
+          setPriceError(e.message || "Impossibile recuperare i prezzi.");
+        }
+        setPriceLoading(false);
       }
 
       function renderAdvisor(text) {
@@ -899,32 +863,6 @@
         });
       }
 
-      // Rende grassetti **testo** dentro una riga
-      function renderInline(text) {
-        return text.split(/(\*\*[^*]+\*\*)/g).map((p,j) =>
-          /^\*\*[^*]+\*\*$/.test(p) ? <b key={j}>{p.slice(2,-2)}</b> : p
-        );
-      }
-
-      // Rende testo markdown: header ###, righe **grassetto**, elenchi, paragrafi
-      function renderRich(text) {
-        return text.split("\n").map((line,i) => {
-          let l = line.trim();
-          if (!l) return <br key={i}/>;
-          if (l === "---" || l === "***" || l === "___") return null; // divisori ignorati
-          if (l.startsWith("#")) {
-            return <div key={i} style={S.aH2}>{renderInline(l.replace(/^#+\s*/,""))}</div>;
-          }
-          if (/^\*\*[^*]+\*\*$/.test(l)) {
-            return <div key={i} style={S.aH2}>{l.slice(2,-2)}</div>;
-          }
-          if (/^[-•*]\s/.test(l)) {
-            return <div key={i} style={S.aLi}>▸ {renderInline(l.replace(/^[-•*]\s/,""))}</div>;
-          }
-          return <p key={i} style={S.aP}>{renderInline(l)}</p>;
-        });
-      }
-
       // ── PROFILE SCREEN ──
       if (!activeProfileId) {
         return <ProfileScreen data={data} onSelect={setActiveProfileId} onCreate={createProfile} onDelete={handleDeleteProfile} />;
@@ -935,29 +873,73 @@
         <div style={S.app}>
           {explainCard && (
             <div style={S.modalOverlay} onClick={()=>{setExplainCard(null);setExplainText(null);}}>
-              <div style={{...S.modalBox, maxHeight:"85vh", display:"flex", flexDirection:"column"}} onClick={e=>e.stopPropagation()} className="fade-in">
-                <div style={{...S.modalHeader, flexShrink:0}}>
+              <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
                   <div style={{display:"flex",alignItems:"center",gap:10}}>
-                    {explainCard.image && <img src={explainCard.image} style={{width:46,borderRadius:4}}/>}
+                    {explainCard.image && <img src={explainCard.image} style={{width:40,borderRadius:4}}/>}
                     <div>
                       <div style={{fontWeight:700,fontSize:14}}>{explainCard.printed_name || explainCard.name}</div>
                       <div style={{fontSize:11,color:"#94a3b8"}}>{explainCard.type}</div>
-                      <div style={{fontSize:10,color:"#64748b",marginTop:2,textTransform:"capitalize"}}>
-                        {[explainCard.manaCost, explainCard.set, explainCard.rarity].filter(Boolean).join(" · ")}
-                      </div>
                     </div>
                   </div>
                   <button style={S.btnGhost} onClick={()=>{setExplainCard(null);setExplainText(null);}}>✕</button>
                 </div>
-                <div style={{flex:1, overflowY:"auto", minHeight:0, marginTop:4}}>
-                  {explaining && (
-                    <div style={{textAlign:"center",padding:"40px 0",color:"#64748b"}}>
-                      <div style={{fontSize:28,marginBottom:8}}>⏳</div>
-                      <div>Analisi in corso…</div>
-                    </div>
-                  )}
-                  {explainText && renderRich(explainText)}
+                {explaining && (
+                  <div style={{textAlign:"center",padding:"30px 0",color:"#64748b"}}>
+                    <div style={{fontSize:28,marginBottom:8}}>⏳</div>
+                    <div>Analisi in corso…</div>
+                  </div>
+                )}
+                {explainText && (
+                  <div style={{marginTop:4}}>
+                    {explainText.split("\n").map((line,i)=>{
+                      if(line.startsWith("**")&&line.endsWith("**")) return <div key={i} style={S.aH2}>{line.replace(/\*\*/g,"")}</div>;
+                      return line.trim() ? <p key={i} style={S.aP}>{line}</p> : <br key={i}/>;
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {priceCard && (
+            <div style={S.modalOverlay} onClick={()=>{setPriceCard(null);setPriceInfo(null);}}>
+              <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>🛒 Miglior prezzo — {priceCard.printed_name || priceCard.name}</span>
+                  <button style={S.btnGhost} onClick={()=>{setPriceCard(null);setPriceInfo(null);}}>✕</button>
                 </div>
+                {priceLoading && (
+                  <div style={{textAlign:"center",padding:"30px 0",color:"#64748b"}}>
+                    <div style={{fontSize:28,marginBottom:8}}>⏳</div>
+                    <div>Cerco i prezzi migliori…</div>
+                  </div>
+                )}
+                {priceError && !priceLoading && (
+                  <div style={{textAlign:"center",fontSize:12,color:"#94a3b8",padding:"10px 0"}}>{priceError}</div>
+                )}
+                {priceInfo && !priceLoading && (
+                  <div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:16}}>
+                      {[["EUR",priceInfo.prices.eur],["EUR Foil",priceInfo.prices.eur_foil],["USD",priceInfo.prices.usd],["USD Foil",priceInfo.prices.usd_foil]].map(([lbl,v])=>(
+                        <div key={lbl} style={{background:"#0e0c16",borderRadius:8,padding:"10px 12px"}}>
+                          <div style={{fontSize:10,color:"#64748b",textTransform:"uppercase"}}>{lbl}</div>
+                          <div style={{fontSize:16,fontWeight:700,color:v?"#f59e0b":"#4a4570"}}>{v ? (lbl.startsWith("EUR")?"€":"$")+v : "N/D"}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={S.pt}>Acquista su</div>
+                    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                      {[["cardmarket","🇪🇺 Cardmarket"],["tcgplayer","🇺🇸 TCGplayer"],["cardhoarder","💻 Cardhoarder (MTGO)"]].map(([k,l])=>(
+                        priceInfo.purchase_uris?.[k]
+                          ? <a key={k} href={priceInfo.purchase_uris[k]} target="_blank" rel="noopener noreferrer" style={S.priceLink}>{l} →</a>
+                          : null
+                      ))}
+                      {!priceInfo.purchase_uris?.cardmarket && !priceInfo.purchase_uris?.tcgplayer && !priceInfo.purchase_uris?.cardhoarder && (
+                        <div style={{fontSize:12,color:"#64748b"}}>Nessun link d'acquisto disponibile per questa stampa.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -967,46 +949,13 @@
           {confirmCard && (
             <CardConfirmModal card={confirmCard} onAdd={addCard} onClose={() => setConfirmCard(null)} />
           )}
-          {selectedCard && (
-            <div style={S.modalOverlay} onClick={()=>setSelectedCard(null)}>
-              <div style={{...S.modalBox, maxWidth:440, maxHeight:"90vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="flip-in">
-                <div style={S.modalHeader}>
-                  <span style={{fontWeight:700, fontSize:15}}>{selectedCard.printed_name || selectedCard.name}</span>
-                  <button style={S.btnGhost} onClick={()=>setSelectedCard(null)}>✕</button>
-                </div>
-                <div style={{display:"flex", gap:14, marginBottom:14}}>
-                  {selectedCard.image
-                    ? <img src={selectedCard.image} alt={selectedCard.name} style={{width:130, borderRadius:8, flexShrink:0}}/>
-                    : <div style={{...S.tileNoImg, width:130, borderRadius:8}}>{selectedCard.printed_name || selectedCard.name}</div>
-                  }
-                  <div style={{flex:1, minWidth:0}}>
-                    <div style={S.dMeta}>{selectedCard.type}</div>
-                    <div style={S.dMeta}>{selectedCard.set} · #{selectedCard.collectorNumber}</div>
-                    <div style={S.dMeta}>Cond: <b>{CONDITION_LABELS[selectedCard.condition]}</b></div>
-                    <div style={S.dMeta}>Qtà: <b>{selectedCard.qty}</b></div>
-                    <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>{cardPrice(selectedCard)>0 ? "€"+(cardPrice(selectedCard)*selectedCard.qty).toFixed(2) : "N/D"}</b></div>
-                  </div>
-                </div>
-                <div style={S.legGrid}>
-                  {FORMATS.map(f=>(
-                    <div key={f} style={{textAlign:"center",fontSize:11}}>
-                      <div style={{fontSize:14}}>{cardLegality(selectedCard,f)}</div>
-                      <div style={{color:"#64748b", fontSize:10}}>{f.slice(0,4)}</div>
-                    </div>
-                  ))}
-                </div>
-                <button style={{...S.btnExplain, marginTop:14}} onClick={()=>{explainCardFn(selectedCard); setSelectedCard(null);}}>💬 Spiega questa carta</button>
-                <button style={{...S.btnDel, width:"100%", marginTop:8}} onClick={()=>removeCard(selectedCard.id)}>🗑 Rimuovi</button>
-              </div>
-            </div>
-          )}
 
           <header style={S.header}>
             <div style={S.hTop}>
               <div style={S.logo}>
-                <span style={S.logoIcon}>✦</span>
+                <span style={S.logoIcon}>⬡</span>
                 <div>
-                  <div style={S.logoTitle}>MyMagic</div>
+                  <div style={S.logoTitle}>MTG Vault</div>
                   <div style={S.logoSub}>{activeProfile?.avatar} {activeProfile?.name}</div>
                 </div>
               </div>
@@ -1056,10 +1005,7 @@
                 )}
                 <div style={S.grid}>
                   {filteredCollection.map(card => (
-                    <div key={card.id} style={S.tile} onClick={() => setSelectedCard(card)}>
-                      {card.synced === false && (
-                        <div style={S.syncWarn} title="Non salvata sul database (solo locale)">⚠️</div>
-                      )}
+                    <div key={card.id} style={S.tile} onClick={() => setSelectedCard(selectedCard?.id===card.id?null:card)}>
                       {card.image
                         ? <img src={card.image} alt={card.name} style={S.tileImg}/>
                         : <div style={S.tileNoImg}>{card.printed_name || card.name}</div>
@@ -1074,6 +1020,26 @@
                           <button style={S.qtyBtn} onClick={()=>updateQty(card.id,+1)}>+</button>
                         </div>
                       </div>
+                      {selectedCard?.id===card.id && (
+                        <div style={S.detail} onClick={e=>e.stopPropagation()}>
+                          <div style={{fontWeight:700,fontSize:14,marginBottom:6}}>{card.printed_name || card.name}</div>
+                          <div style={S.dMeta}>{card.type}</div>
+                          <div style={S.dMeta}>{card.set} · #{card.collectorNumber}</div>
+                          <div style={S.dMeta}>Cond: <b>{CONDITION_LABELS[card.condition]}</b> · Qtà: <b>{card.qty}</b></div>
+                          <div style={S.dMeta}>Valore: <b style={{color:"#f59e0b"}}>{cardPrice(card)>0 ? "€"+(cardPrice(card)*card.qty).toFixed(2) : "N/D"}</b></div>
+                          <div style={S.legGrid}>
+                            {FORMATS.map(f=>(
+                              <div key={f} style={{textAlign:"center",fontSize:10}}>
+                                <div>{cardLegality(card,f)}</div>
+                                <div style={{color:"#64748b"}}>{f.slice(0,4)}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <button style={S.btnExplain} onClick={e=>{e.stopPropagation();explainCardFn(card);}}>💬 Spiega questa carta</button>
+                          <button style={S.btnPrice} onClick={e=>{e.stopPropagation();findBestPrice(card);}}>🛒 Trova il prezzo migliore</button>
+                          <button style={S.btnDel} onClick={()=>removeCard(card.id)}>🗑 Rimuovi</button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1096,6 +1062,43 @@
                         <button style={S.btnP} onClick={createDeck}>+ Crea</button>
                       </div>
                     </div>
+
+                    <div style={S.panel}>
+                      <div style={S.pt}>📥 Importa un mazzo da Moxfield</div>
+                      {!moxPreview && (
+                        <>
+                          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                            <input style={{...S.inp,flex:1,minWidth:180}} placeholder="Incolla il link Moxfield del mazzo…"
+                              value={moxUrl} onChange={e=>setMoxUrl(e.target.value)}
+                              onKeyDown={e=>e.key==="Enter"&&fetchMoxfieldDeck()} />
+                            <button style={S.btnP} onClick={fetchMoxfieldDeck} disabled={moxLoading}>
+                              {moxLoading?"⏳ Carico…":"🔍 Trova mazzo"}
+                            </button>
+                          </div>
+                          {moxError && <div style={{fontSize:12,color:"#f87171",marginTop:8}}>{moxError}</div>}
+                        </>
+                      )}
+                      {moxPreview && (
+                        <div className="fade-in">
+                          <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>{moxPreview.name}</div>
+                          <div style={{fontSize:12,color:"#94a3b8",marginBottom:12}}>{moxPreview.cardCount} carte trovate su Moxfield</div>
+                          <label style={S.lbl}>Formato del mazzo</label>
+                          <select style={{...S.sel,width:"100%",marginBottom:14}} value={moxFormat} onChange={e=>setMoxFormat(e.target.value)}>
+                            {FORMATS.map(f=><option key={f}>{f}</option>)}
+                          </select>
+                          <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>
+                            Alla creazione, ogni carta verrà confrontata con la tua collezione — vedrai subito quali possiedi già e quali devi ancora cercare.
+                          </div>
+                          <div style={{display:"flex",gap:10}}>
+                            <button style={{...S.btnP,flex:1}} onClick={confirmMoxfieldImport} disabled={moxImporting}>
+                              {moxImporting?"⏳ Creo il mazzo…":"✅ Crea il mio mazzo"}
+                            </button>
+                            <button style={{...S.btnGhost,flex:1}} onClick={()=>{setMoxPreview(null);setMoxUrl("");setMoxError("");}}>Annulla</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
                     {myDecks.length===0 && <div style={S.empty}><div style={{fontSize:36,marginBottom:10}}>⚔️</div>Nessun mazzo ancora.</div>}
                     <div style={S.deckGrid}>
                       {myDecks.map(deck => {
@@ -1147,13 +1150,33 @@
                         </div>
                       </div>
                       <div style={{...S.panel,flex:1}}>
-                        <div style={S.pt}>Nel mazzo</div>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                          <div style={S.pt}>Nel mazzo</div>
+                          {deckCards.some(c=>c.owned!==undefined) && (
+                            <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
+                              <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
+                              Solo mancanti
+                            </label>
+                          )}
+                        </div>
+                        {deckCards.some(c=>c.owned!==undefined) && (
+                          <div style={{display:"flex",gap:10,marginBottom:10,fontSize:11}}>
+                            <span style={{color:"#34d399"}}>✅ {deckCards.filter(c=>c.owned).length} possedute</span>
+                            <span style={{color:"#f87171"}}>❌ {deckCards.filter(c=>!c.owned).length} da cercare</span>
+                          </div>
+                        )}
                         {deckCards.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte dalla collezione</div>}
-                        {deckCards.map(card=>(
+                        {deckCards.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
                           <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e"}}>
                             <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
+                            {card.owned!==undefined && (
+                              <span title={card.owned?"Posseduta":"Da cercare"} style={{fontSize:11}}>{card.owned?"✅":"❌"}</span>
+                            )}
                             <span style={{flex:1,fontSize:12}}>{card.printed_name || card.name}</span>
-                            <span style={{fontSize:10,color:"#64748b",maxWidth:70,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.type?.split("—")[0]}</span>
+                            <span style={{fontSize:10,color:"#64748b",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.type?.split("—")[0]}</span>
+                            {card.owned===false && (
+                              <button style={S.btnMini} title="Trova il prezzo migliore" onClick={()=>findBestPrice(card)}>🛒</button>
+                            )}
                             <button style={S.btnMini} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>×</button>
                           </div>
                         ))}
@@ -1323,6 +1346,8 @@
       btnP:{padding:"8px 18px",background:"#f59e0b",color:"#0a0a0f",border:"none",borderRadius:7,fontWeight:700,cursor:"pointer",fontSize:13,whiteSpace:"nowrap"},
       btnGhost:{padding:"6px 14px",background:"transparent",border:"1px solid #2d2b3e",color:"#94a3b8",borderRadius:6,cursor:"pointer",fontSize:12},
       btnExplain:{display:"block",width:"100%",marginTop:8,padding:"7px",background:"#1e3a5f",color:"#93c5fd",border:"1px solid #1d4ed8",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
+      btnPrice:{display:"block",width:"100%",marginTop:6,padding:"7px",background:"#3a2e1e",color:"#f59e0b",border:"1px solid #92600e",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
+      priceLink:{display:"block",padding:"10px 12px",background:"#0e0c16",borderRadius:8,color:"#e2e8f0",fontSize:13,fontWeight:600,textDecoration:"none",border:"1px solid #2d2b3e"},
       btnDel:{marginTop:6,padding:"6px 14px",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,cursor:"pointer",fontSize:12},
       btnSm:{padding:"5px 10px",background:"#1e1b2e",border:"none",borderRadius:5,color:"#f8fafc",cursor:"pointer",fontSize:12},
       btnMini:{padding:"2px 8px",background:"#1e1b2e",border:"1px solid #2d2b3e",borderRadius:4,color:"#94a3b8",cursor:"pointer",fontSize:12},
@@ -1332,7 +1357,6 @@
       empty:{color:"#4a4570",textAlign:"center",padding:"36px 20px",fontSize:13},
       grid:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(145px,1fr))",gap:12},
       tile:{background:"#12101a",border:"1px solid #1e1b2e",borderRadius:10,cursor:"pointer",position:"relative"},
-      syncWarn:{position:"absolute",top:6,left:6,zIndex:5,background:"rgba(10,10,15,.85)",borderRadius:6,padding:"2px 5px",fontSize:14,lineHeight:1,border:"1px solid #7f1d1d"},
       tileImg:{width:"100%",borderRadius:"10px 10px 0 0",display:"block"},
       tileNoImg:{padding:20,textAlign:"center",fontSize:12,color:"#64748b",background:"#1e1b2e",minHeight:100,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:"10px 10px 0 0"},
       tileBody:{padding:"8px 10px"},
