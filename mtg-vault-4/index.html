@@ -639,6 +639,12 @@
         const u = { ...data };
         const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
         if (card.legalities?.[deck.format.toLowerCase()]!=="legal") { alert(`${card.name} non è legale in ${deck.format}!`); return; }
+        const canonName = canonicalCardName(card.name);
+        const existingByName = deck.cards.find(c => canonicalCardName(c.name)===canonName);
+        if (existingByName) {
+          alert(`"${card.printed_name||card.name}" è già richiesta nel mazzo (${existingByName.qty||1}×). Il possesso si aggiorna automaticamente dalla tua collezione: non serve aggiungerla di nuovo.`);
+          return;
+        }
         const ex = deck.cards.find(c => c.scryfallId===card.scryfallId);
         if (ex) ex.qty=(ex.qty||1)+1; else deck.cards.push({...card,qty:1});
         await saveDeck(deck);
@@ -671,6 +677,8 @@
 
       const deckCards = currentDeck?.cards || [];
       const deckTotal = deckCards.reduce((s,c) => s+(c.qty||1), 0);
+      const commanderQty = deckCards.filter(c=>c.isCommander).reduce((s,c)=>s+(c.qty||1),0);
+      const mainboardQty = deckTotal - commanderQty;
       const myDecks = data.decks.filter(d => d.ownerId===activeProfileId);
 
       // Mappa nome canonico (invariante tra lingue, con alias terre base) -> quantità totale posseduta,
@@ -1295,23 +1303,33 @@
                             </label>
                           )}
                         </div>
-                        {deckCardsLive.some(c=>c.owned!==undefined) && (
-                          <div style={{display:"flex",flexDirection:"column",gap:2,marginBottom:10,fontSize:11}}>
-                            <div style={{display:"flex",gap:10}}>
-                              <span style={{color:"#34d399"}}>✅ {deckCardsLive.filter(c=>c.owned).length} titoli posseduti</span>
-                              <span style={{color:"#f87171"}}>❌ {deckCardsLive.filter(c=>!c.owned).length} titoli da cercare</span>
+                        {deckCardsLive.some(c=>c.owned!==undefined) && (() => {
+                          const ownedCopies = deckCardsLive.reduce((s,c) => {
+                            if (c.owned === undefined) return s + (c.qty||1);
+                            return s + Math.min(c.ownedQty||0, c.qty||1);
+                          }, 0);
+                          const missingCopies = deckTotal - ownedCopies;
+                          return (
+                            <div style={{display:"flex",flexDirection:"column",gap:2,marginBottom:10,fontSize:11}}>
+                              <div style={{display:"flex",gap:10}}>
+                                <span style={{color:"#34d399"}}>✅ {ownedCopies} carte possedute</span>
+                                <span style={{color:"#f87171"}}>❌ {missingCopies} carte da cercare</span>
+                              </div>
+                              <div style={{color:"#64748b"}}>
+                                ({deckCardsLive.filter(c=>c.owned).length} titoli completi su {deckCardsLive.length})
+                              </div>
                             </div>
-                            <div style={{color:"#64748b"}}>
-                              ({deckCardsLive.filter(c=>c.owned).reduce((s,c)=>s+(c.qty||1),0)} carte possedute su {deckTotal} totali)
-                            </div>
-                          </div>
-                        )}
+                          );
+                        })()}
                         {deckCardsLive.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte dalla collezione</div>}
                         {deckViewMode==="list" && deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
                           <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e",...(card.isCommander?{background:"#241a08",borderRadius:6,paddingLeft:6}:{})}}>
                             <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
                             {card.owned!==undefined && (
-                              <span title={card.owned?"Posseduta":"Da cercare"} style={{fontSize:11}}>{card.owned?"✅":"❌"}</span>
+                              <span title={card.owned?"Posseduta":`Possiedi ${card.ownedQty||0} su ${card.qty||1} necessarie`} style={{fontSize:11,display:"flex",alignItems:"center",gap:3}}>
+                                {card.owned?"✅":"❌"}
+                                {!card.owned && <span style={{fontSize:9,color:"#64748b"}}>({card.ownedQty||0}/{card.qty||1})</span>}
+                              </span>
                             )}
                             {card.isCommander && <span title="Comandante" style={{fontSize:13}}>👑</span>}
                             <span style={{flex:1,fontSize:12,fontWeight:card.isCommander?700:400}}>{card.printed_name || card.name}</span>
@@ -1331,7 +1349,7 @@
                               <div key={card.id} style={{...S.miniTile,...(card.isCommander?{border:"2px solid #f59e0b"}:{})}}>
                                 {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
                                 {card.isCommander && <span style={{...S.miniQty,left:"auto",right:4,background:"#f59e0b",color:"#0a0a0f"}}>👑</span>}
-                                <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":" ❌") : ""}</span>
+                                <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":` ❌ (${card.ownedQty||0}/${card.qty||1})`) : ""}</span>
                                 {currentDeck.format==="Commander" && (
                                   <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑 {card.isCommander?"Rimuovi":"Designa"}</button>
                                 )}
