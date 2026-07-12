@@ -66,7 +66,7 @@
             }))
           })),
           decks: (decks||[]).map(d => ({
-            ...d, ownerId: d.profile_id,
+            ...d, ownerId: d.profile_id, isImported: !!d.is_imported,
             cards: d.cards || []
           }))
         };
@@ -111,12 +111,20 @@
     }
 
     async function saveDeck(deck) {
+      const payload = {
+        id: deck.id, profile_id: deck.ownerId, name: deck.name,
+        format: deck.format, cards: deck.cards, is_imported: !!deck.isImported
+      };
       try {
-        await sb.from("decks").upsert({
-          id: deck.id, profile_id: deck.ownerId, name: deck.name,
-          format: deck.format, cards: deck.cards
-        });
-      } catch(e) { console.error("saveDeck error", e); }
+        const { error } = await sb.from("decks").upsert(payload);
+        if (error) throw error;
+      } catch(e) {
+        console.warn("saveDeck: colonna is_imported forse mancante, ritento senza", e);
+        try {
+          const { is_imported, ...fallback } = payload;
+          await sb.from("decks").upsert(fallback);
+        } catch(e2) { console.error("saveDeck error", e2); }
+      }
     }
 
     async function deleteDeck(id) {
@@ -234,6 +242,13 @@
     function canonicalCardName(name) {
       const key = (name||"").trim().toLowerCase();
       return BASIC_LAND_ALIASES[key] || key;
+    }
+    // Regola base di Magic: solo creature leggendarie (o planeswalker leggendari
+    // abilitati) possono essere comandanti. Approssimazione ragionevole senza
+    // dover leggere il testo oracle completo.
+    function canBeCommander(card) {
+      const t = (card?.type||"").toLowerCase();
+      return t.includes("legendary") && (t.includes("creature") || t.includes("planeswalker"));
     }
 
     // ── PROFILE SCREEN ───────────────────────────────────────
@@ -528,6 +543,8 @@
       const [colView, setColView] = useState("grid"); // "grid" | "list" — vista collezione
       const [deckViewMode, setDeckViewMode] = useState("list"); // "list" | "grid" — vista pannelli mazzo
       const [pickerOpen, setPickerOpen] = useState(false); // tendina "aggiungi dalla collezione"
+      const [pendingAction, setPendingAction] = useState(null); // modifica in attesa di conferma su mazzo importato
+      const [forkName, setForkName] = useState("");
       const [deckName, setDeckName] = useState("");
       const [deckFormat, setDeckFormat] = useState("Commander");
       const [activeDeck, setActiveDeck] = useState(null);
@@ -635,9 +652,67 @@
         persist({ ...data, decks: [...data.decks, deck] });
         setDeckName(""); setActiveDeck(deck.id); setDeckView("build");
       }
-      async function addToDeck(deckId, card) {
+      // Esegue davvero la modifica sul mazzo indicato (usata sia per l'originale che per una copia)
+      async function executeDeckAction(deckId, action) {
         const u = { ...data };
         const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
+        if (action.type==="addCard") {
+          const card = action.card;
+          const ex = deck.cards.find(c => c.scryfallId===card.scryfallId);
+          if (ex) ex.qty=(ex.qty||1)+1; else deck.cards.push({...card,qty:1});
+        } else if (action.type==="removeCard") {
+          deck.cards = deck.cards.filter(c => c.id!==action.cardId);
+        } else if (action.type==="toggleCommander") {
+          const makingCommander = !deck.cards.find(c=>c.id===action.cardId)?.isCommander;
+          deck.cards = deck.cards.map(c => ({ ...c, isCommander: c.id===action.cardId ? makingCommander : false }));
+        }
+        await saveDeck(deck);
+        persist(u);
+      }
+
+      // Se il mazzo è importato (es. da Moxfield), chiede se modificare l'originale
+      // o crearne una copia prima di applicare la modifica; altrimenti procede/chiede conferma normale
+      function guardedDeckAction(deck, action, confirmMessage) {
+        if (deck.isImported) {
+          setPendingAction({ ...action, deckId: deck.id, deckName: deck.name });
+          return;
+        }
+        if (confirmMessage && !confirm(confirmMessage)) return;
+        executeDeckAction(deck.id, action);
+      }
+
+      async function forkDeckAndApply(newName) {
+        if (!pendingAction) return;
+        const original = data.decks.find(d => d.id===pendingAction.deckId);
+        if (!original) { setPendingAction(null); return; }
+        const copy = {
+          id: crypto.randomUUID(),
+          name: (newName||"").trim() || `${original.name} (copia)`,
+          format: original.format,
+          ownerId: original.ownerId,
+          isImported: false,
+          cards: original.cards.map(c => ({ ...c, id: crypto.randomUUID() }))
+        };
+        // Rimappa l'id carta dell'azione pendente sul nuovo id nella copia (stessa posizione)
+        const idx = original.cards.findIndex(c => c.id === pendingAction.cardId);
+        const mappedCardId = idx>=0 ? copy.cards[idx].id : pendingAction.cardId;
+        await saveDeck(copy);
+        const u = { ...data, decks: [...data.decks, copy] };
+        persist(u);
+        await executeDeckAction(copy.id, { ...pendingAction, cardId: mappedCardId });
+        setActiveDeck(copy.id);
+        setPendingAction(null);
+        setForkName("");
+      }
+
+      async function applyToOriginalDeck() {
+        if (!pendingAction) return;
+        await executeDeckAction(pendingAction.deckId, pendingAction);
+        setPendingAction(null);
+      }
+
+      async function addToDeck(deckId, card) {
+        const deck = data.decks.find(d => d.id===deckId); if (!deck) return;
         if (card.legalities?.[deck.format.toLowerCase()]!=="legal") { alert(`${card.name} non è legale in ${deck.format}!`); return; }
         const canonName = canonicalCardName(card.name);
         const existingByName = deck.cards.find(c => canonicalCardName(c.name)===canonName);
@@ -645,29 +720,16 @@
           alert(`"${card.printed_name||card.name}" è già richiesta nel mazzo (${existingByName.qty||1}×). Il possesso si aggiorna automaticamente dalla tua collezione: non serve aggiungerla di nuovo.`);
           return;
         }
-        const ex = deck.cards.find(c => c.scryfallId===card.scryfallId);
-        if (ex) ex.qty=(ex.qty||1)+1; else deck.cards.push({...card,qty:1});
-        await saveDeck(deck);
-        persist(u);
+        guardedDeckAction(deck, { type:"addCard", card });
       }
       async function removeFromDeck(deckId, cardId) {
-        const u = { ...data };
-        const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
-        deck.cards = deck.cards.filter(c => c.id!==cardId);
-        await saveDeck(deck);
-        persist(u);
+        const deck = data.decks.find(d => d.id===deckId); if (!deck) return;
+        const card = deck.cards.find(c => c.id===cardId);
+        guardedDeckAction(deck, { type:"removeCard", cardId }, `Eliminare "${card?.printed_name||card?.name||"questa carta"}" dal mazzo?`);
       }
       async function toggleCommander(deckId, cardId) {
-        const u = { ...data };
-        const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
-        const target = deck.cards.find(c => c.id===cardId); if (!target) return;
-        const makingCommander = !target.isCommander;
-        deck.cards = deck.cards.map(c => ({
-          ...c,
-          isCommander: c.id===cardId ? makingCommander : false
-        }));
-        await saveDeck(deck);
-        persist(u);
+        const deck = data.decks.find(d => d.id===deckId); if (!deck) return;
+        guardedDeckAction(deck, { type:"toggleCommander", cardId });
       }
       async function handleDeleteDeck(deckId) {
         await deleteDeck(deckId);
@@ -886,7 +948,7 @@
             };
           });
 
-          const deck = { id: crypto.randomUUID(), name: moxPreview.name, format: moxFormat, cards: deckCardsList, ownerId: activeProfileId };
+          const deck = { id: crypto.randomUUID(), name: moxPreview.name, format: moxFormat, cards: deckCardsList, ownerId: activeProfileId, isImported: true };
           await saveDeck(deck);
           persist({ ...data, decks: [...data.decks, deck] });
           setMoxPreview(null); setMoxUrl(""); setActiveDeck(deck.id); setDeckView("build");
@@ -991,6 +1053,25 @@
                     })}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+          {pendingAction && (
+            <div style={S.modalOverlay} onClick={()=>{setPendingAction(null);setForkName("");}}>
+              <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>📥 Mazzo importato</span>
+                  <button style={S.btnGhost} onClick={()=>{setPendingAction(null);setForkName("");}}>✕</button>
+                </div>
+                <div style={{fontSize:13,color:"#cbd5e1",marginBottom:16,lineHeight:1.5}}>
+                  "{pendingAction.deckName}" proviene da Moxfield. Vuoi modificare direttamente il mazzo originale, oppure creare una copia (con un nuovo nome) e applicare la modifica solo lì?
+                </div>
+                <input style={{...S.inp,width:"100%",marginBottom:12}} placeholder={`${pendingAction.deckName} (copia)`} value={forkName} onChange={e=>setForkName(e.target.value)} />
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <button style={{...S.btnP,width:"100%",padding:12}} onClick={()=>forkDeckAndApply(forkName)}>📋 Crea una copia e applica qui</button>
+                  <button style={{...S.btnGhost,width:"100%",padding:12}} onClick={applyToOriginalDeck}>✏️ Modifica l'originale</button>
+                  <button style={{...S.btnGhost,width:"100%",padding:12}} onClick={()=>{setPendingAction(null);setForkName("");}}>Annulla</button>
+                </div>
               </div>
             </div>
           )}
@@ -1337,10 +1418,10 @@
                             {card.owned===false && (
                               <button style={S.btnMini} title="Trova il prezzo migliore" onClick={()=>findBestPrice(card)}>🛒</button>
                             )}
-                            {currentDeck.format==="Commander" && (
-                              <button style={{...S.btnMini,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} title="Designa come comandante" onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑</button>
+                            {currentDeck.format==="Commander" && canBeCommander(card) && (
+                              <button style={{...S.btnMini,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} title={card.isCommander?"Togli il ruolo di comandante":"Designa come comandante"} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑</button>
                             )}
-                            <button style={S.btnMini} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>×</button>
+                            <button style={S.btnMini} title="Elimina dal mazzo" onClick={()=>removeFromDeck(currentDeck.id,card.id)}>🗑</button>
                           </div>
                         ))}
                         {deckViewMode==="grid" && (
@@ -1350,10 +1431,10 @@
                                 {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
                                 {card.isCommander && <span style={{...S.miniQty,left:"auto",right:4,background:"#f59e0b",color:"#0a0a0f"}}>👑</span>}
                                 <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":` ❌ (${card.ownedQty||0}/${card.qty||1})`) : ""}</span>
-                                {currentDeck.format==="Commander" && (
-                                  <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑 {card.isCommander?"Rimuovi":"Designa"}</button>
+                                {currentDeck.format==="Commander" && canBeCommander(card) && (
+                                  <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>{card.isCommander?"👑 Comandante ✕":"👑 Rendi comandante"}</button>
                                 )}
-                                <button style={S.miniBtn} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>× Rimuovi</button>
+                                <button style={S.miniBtn} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>🗑 Elimina dal mazzo</button>
                               </div>
                             ))}
                           </div>
