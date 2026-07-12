@@ -28,6 +28,10 @@
     const { useState, useRef, useCallback, useEffect, useMemo } = React;
 
     const FORMATS = ["Standard","Pioneer","Modern","Legacy","Vintage","Commander","Pauper"];
+    // Parole chiave per riconoscere set "Universes Beyond"/crossover, così il toggle
+    // "nascondi crossover" nella ricerca può filtrarli (specie utile per le terre base,
+    // ristampate in praticamente ogni set)
+    const CROSSOVER_KEYWORDS = ["marvel","spider-man","avatar","teenage mutant ninja turtles","transformers","assassin's creed","fallout","warhammer","doctor who","jurassic","final fantasy","lord of the rings","walking dead"];
     const FORMAT_COLORS = {
       Standard:"#4e9af1", Pioneer:"#a78bfa", Modern:"#34d399",
       Legacy:"#f59e0b", Vintage:"#f87171", Commander:"#c084fc", Pauper:"#94a3b8"
@@ -365,6 +369,8 @@
       const [status, setStatus] = useState("");
       const [manualName, setManualName] = useState("");
       const [results, setResults] = useState([]); // lista risultati multipli
+      const [resultFilter, setResultFilter] = useState("");
+      const [hideCrossover, setHideCrossover] = useState(true);
       const [suggestions, setSuggestions] = useState([]); // autocomplete
       const [showSugg, setShowSugg] = useState(false);
       const [listening, setListening] = useState(false);
@@ -448,8 +454,8 @@
 
             {/* Search bar con autocomplete e voce */}
             <div style={{position:"relative"}}>
-              <div style={{display:"flex", gap:8}}>
-                <input style={{...S.inp, flex:1}}
+              <div style={{display:"flex", gap:6}}>
+                <input style={{...S.inp, flex:1, minWidth:0}}
                   placeholder="Scrivi o ditta il nome carta…"
                   value={manualName}
                   onChange={e => { handleTypeahead(e.target.value); setResults([]); setStatus(""); }}
@@ -457,11 +463,11 @@
                   onBlur={() => setTimeout(()=>setShowSugg(false), 150)}
                   onFocus={() => suggestions.length>0 && setShowSugg(true)}
                   autoFocus />
-                <button style={{...S.btnP, background:listening?"#ef4444":"#1e1b2e", border:"1px solid #2d2b3e"}}
+                <button style={{...S.btnP, background:listening?"#ef4444":"#1e1b2e", border:"1px solid #2d2b3e", padding:"8px 10px", flexShrink:0}}
                   onClick={startVoice} title="Cerca con la voce">
                   {listening ? "⏹" : "🎤"}
                 </button>
-                <button style={S.btnP} onClick={manualSearch} disabled={scanning}>🔍</button>
+                <button style={{...S.btnP, padding:"8px 10px", flexShrink:0}} onClick={manualSearch} disabled={scanning}>🔍</button>
               </div>
               {showSugg && suggestions.length>0 && (
                 <div style={S.suggBox}>
@@ -479,10 +485,25 @@
               <div style={{fontSize:12, color:"#34d399", margin:"10px 0 4px", fontWeight:600}}>{status}</div>
             )}
 
+            {/* Filtro sui risultati, utile quando sono tante (es. terre base) */}
+            {results.length>6 && (
+              <div style={{marginTop:6}}>
+                <input style={{...S.inp,width:"100%",marginBottom:8}} placeholder="Filtra per nome set…"
+                  value={resultFilter} onChange={e=>setResultFilter(e.target.value)} />
+                <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                  <input type="checkbox" checked={hideCrossover} onChange={e=>setHideCrossover(e.target.checked)} />
+                  Nascondi set crossover (Marvel, Avatar, TMNT…)
+                </label>
+              </div>
+            )}
+
             {/* Lista risultati */}
             {results.length>0 && (
               <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}}>
-                {results.map(card => {
+                {results
+                  .filter(card => !resultFilter || (card.set_name||"").toLowerCase().includes(resultFilter.toLowerCase()))
+                  .filter(card => !hideCrossover || !CROSSOVER_KEYWORDS.some(k => (card.set_name||"").toLowerCase().includes(k)))
+                  .map(card => {
                   const year = card.released_at ? card.released_at.slice(0,4) : "";
                   const langFlag = {en:"🇬🇧",it:"🇮🇹",fr:"🇫🇷",de:"🇩🇪",es:"🇪🇸",pt:"🇵🇹",ja:"🇯🇵",ko:"🇰🇷",ru:"🇷🇺",zhs:"🇨🇳",zht:"🇨🇳"}[card.lang] || card.lang?.toUpperCase() || "";
                   return (
