@@ -54,11 +54,13 @@
 
     async function loadData() {
       try {
-        const [{ data: profiles }, { data: cards }, { data: decks }] = await Promise.all([
+        const [{ data: profiles }, { data: cards }, { data: decks }, gamesRes] = await Promise.all([
           sb.from("profiles").select("*").order("created_at"),
           sb.from("cards").select("*").order("added_at"),
           sb.from("decks").select("*").order("created_at"),
+          sb.from("games").select("*").order("created_at", { ascending:false }).then(r=>r).catch(()=>({data:[]})),
         ]);
+        const games = gamesRes?.data || [];
         // Assemble: attach cards to profiles
         const assembled = {
           profiles: (profiles||[]).map(p => ({
@@ -72,6 +74,9 @@
           decks: (decks||[]).map(d => ({
             ...d, ownerId: d.profile_id, isImported: !!d.is_imported,
             cards: d.cards || []
+          })),
+          games: (games||[]).map(g => ({
+            ...g, ownerId: g.profile_id, players: g.players || [], winnerName: g.winner_name
           }))
         };
         saveLocalData(assembled); // cache locale
@@ -140,6 +145,20 @@
 
     async function deleteDeck(id) {
       try { await sb.from("decks").delete().eq("id", id); } catch(e) { console.error(e); }
+    }
+
+    async function saveGame(game) {
+      try {
+        const { error } = await sb.from("games").upsert({
+          id: game.id, profile_id: game.ownerId, format: game.format,
+          players: game.players, winner_name: game.winnerName
+        });
+        if (error) throw error;
+        return true;
+      } catch(e) { console.warn("saveGame error (tabella 'games' forse non ancora creata):", e); return false; }
+    }
+    async function deleteGame(id) {
+      try { await sb.from("games").delete().eq("id", id); } catch(e) { console.error(e); }
     }
 
     // ── SCRYFALL ─────────────────────────────────────────────
@@ -695,7 +714,7 @@
     }
 
     function App() {
-      const [data, setData] = useState({ profiles: [], decks: [] });
+      const [data, setData] = useState({ profiles: [], decks: [], games: [] });
       const [loading, setLoading] = useState(true);
       const [activeProfileId, setActiveProfileId] = useState(null);
 
@@ -711,6 +730,20 @@
       const [colView, setColView] = useState("grid"); // "grid" | "list" — vista collezione
       const [statsOpen, setStatsOpen] = useState(false);
       const [showCsvImport, setShowCsvImport] = useState(false);
+
+      // ── SEGNAPUNTI PARTITA ──
+      const [matchView, setMatchView] = useState("setup"); // setup | live | history
+      const [matchFormat, setMatchFormat] = useState("Commander");
+      const [matchStartLife, setMatchStartLife] = useState(40);
+      const [trackPoison, setTrackPoison] = useState(true);
+      const [trackCmdDamage, setTrackCmdDamage] = useState(true);
+      const [matchSetupPlayers, setMatchSetupPlayers] = useState([
+        { key:1, name:"", profileId:"", deckId:"" },
+        { key:2, name:"", profileId:"", deckId:"" }
+      ]);
+      const [livePlayers, setLivePlayers] = useState(null); // array attiva durante la partita
+      const [expandedCmd, setExpandedCmd] = useState(null); // id giocatore con pannello danno comandante aperto
+      const [showWinnerPicker, setShowWinnerPicker] = useState(false);
       const [csvText, setCsvText] = useState("");
       const [csvImporting, setCsvImporting] = useState(false);
       const [csvResult, setCsvResult] = useState("");
@@ -909,6 +942,61 @@
         await deleteDeck(deckId);
         persist({ ...data, decks: data.decks.filter(d => d.id!==deckId) });
         if (activeDeck===deckId) { setActiveDeck(null); setDeckView("list"); }
+      }
+
+      // ── SEGNAPUNTI PARTITA ──
+      function addMatchPlayer() {
+        if (matchSetupPlayers.length >= 6) return;
+        setMatchSetupPlayers(ps => [...ps, { key: Date.now(), name:"", profileId:"", deckId:"" }]);
+      }
+      function removeMatchPlayer(key) {
+        if (matchSetupPlayers.length <= 2) return;
+        setMatchSetupPlayers(ps => ps.filter(p => p.key!==key));
+      }
+      function updateMatchPlayer(key, field, value) {
+        setMatchSetupPlayers(ps => ps.map(p => p.key===key ? { ...p, [field]:value, ...(field==="profileId"?{deckId:""}:{}) } : p));
+      }
+      function startMatch() {
+        const players = matchSetupPlayers.map(p => {
+          const profile = data.profiles.find(pr => pr.id===p.profileId);
+          const deck = data.decks.find(d => d.id===p.deckId);
+          return {
+            id: p.key, name: p.name.trim() || profile?.name || `Giocatore ${p.key}`,
+            profileId: p.profileId||null, deckId: p.deckId||null, deckName: deck?.name||null,
+            life: matchStartLife, poison: 0, cmdDamage: {}
+          };
+        });
+        setLivePlayers(players);
+        setMatchView("live");
+      }
+      function adjustLife(id, delta) {
+        setLivePlayers(ps => ps.map(p => p.id===id ? { ...p, life: p.life+delta } : p));
+      }
+      function adjustPoison(id, delta) {
+        setLivePlayers(ps => ps.map(p => p.id===id ? { ...p, poison: Math.max(0,p.poison+delta) } : p));
+      }
+      function adjustCmdDamage(targetId, fromId, delta) {
+        setLivePlayers(ps => ps.map(p => {
+          if (p.id!==targetId) return p;
+          const cur = p.cmdDamage[fromId]||0;
+          const next = Math.max(0, cur+delta);
+          return { ...p, cmdDamage: { ...p.cmdDamage, [fromId]: next }, life: p.life - delta };
+        }));
+      }
+      async function finalizeMatch(winnerId) {
+        const winner = livePlayers.find(p=>p.id===winnerId);
+        const game = {
+          id: crypto.randomUUID(), ownerId: activeProfileId, format: matchFormat,
+          players: livePlayers.map(p => ({ name:p.name, deckId:p.deckId, deckName:p.deckName, finalLife:p.life, poison:p.poison })),
+          winnerName: winner?.name || "Nessuno / pareggio"
+        };
+        const ok = await saveGame(game);
+        if (ok) persist({ ...data, games: [game, ...(data.games||[])] });
+        setShowWinnerPicker(false); setLivePlayers(null); setMatchView("history");
+      }
+      async function handleDeleteGame(id) {
+        await deleteGame(id);
+        persist({ ...data, games: (data.games||[]).filter(g=>g.id!==id) });
       }
 
       const deckCards = (currentDeck?.cards || []).filter(c => !c.isSideboard);
@@ -1428,7 +1516,7 @@
               </button>
             </div>
             <nav style={S.nav}>
-              {[["collection","🃏 Collezione"],["decks","⚔️ Mazzi"],["advisor","🤖 AI Advisor"]].map(([k,l]) => (
+              {[["collection","🃏 Collezione"],["decks","⚔️ Mazzi"],["match","🎮 Partita"],["advisor","🤖 AI Advisor"]].map(([k,l]) => (
                 <button key={k} onClick={() => setTab(k)} style={{...S.navBtn,...(tab===k?S.navActive:{})}}>
                   {l}
                 </button>
@@ -1777,6 +1865,195 @@
               </div>
             )}
 
+            {/* ── PARTITA (segnapunti) ── */}
+            {tab==="match" && (
+              <div style={S.col} className="fade-in">
+                <div style={{display:"flex",gap:8,background:"#12101a",borderRadius:10,padding:6,border:"1px solid #1e1b2e"}}>
+                  {[["setup","🆕 Nuova"],["live","🎮 In corso"],["history","📜 Storico"]].map(([m,l])=>(
+                    <button key={m} onClick={()=>setMatchView(m)}
+                      style={{flex:1,padding:"9px 0",borderRadius:7,border:"none",cursor:"pointer",fontWeight:600,fontSize:12,
+                        background:matchView===m?"#f59e0b":"transparent",color:matchView===m?"#0a0a0f":"#64748b"}}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+
+                {matchView==="setup" && (
+                  <div style={S.panel}>
+                    <div style={S.pt}>Impostazioni partita</div>
+                    <div style={{display:"flex",gap:10,marginBottom:14}}>
+                      <div style={{flex:1}}>
+                        <label style={S.lbl}>Formato</label>
+                        <select style={{...S.sel,width:"100%"}} value={matchFormat}
+                          onChange={e=>{setMatchFormat(e.target.value); setMatchStartLife(e.target.value==="Commander"?40:20);}}>
+                          {FORMATS.map(f=><option key={f}>{f}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={S.lbl}>Vita iniziale</label>
+                        <input style={{...S.inp,width:70}} type="number" value={matchStartLife}
+                          onChange={e=>setMatchStartLife(parseInt(e.target.value)||20)} />
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:16,marginBottom:16}}>
+                      <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:6}}>
+                        <input type="checkbox" checked={trackPoison} onChange={e=>setTrackPoison(e.target.checked)} /> Veleno
+                      </label>
+                      <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:6}}>
+                        <input type="checkbox" checked={trackCmdDamage} onChange={e=>setTrackCmdDamage(e.target.checked)} /> Danno comandante
+                      </label>
+                    </div>
+
+                    <div style={S.pt}>Giocatori</div>
+                    {matchSetupPlayers.map(p => {
+                      const prof = data.profiles.find(pr=>pr.id===p.profileId);
+                      const availDecks = data.decks.filter(d=>d.ownerId===p.profileId);
+                      return (
+                        <div key={p.key} style={{background:"#0e0c16",borderRadius:8,padding:10,marginBottom:8}}>
+                          <div style={{display:"flex",gap:8,marginBottom:8}}>
+                            <input style={{...S.inp,flex:1}} placeholder="Nome giocatore…" value={p.name}
+                              onChange={e=>updateMatchPlayer(p.key,"name",e.target.value)} />
+                            {matchSetupPlayers.length>2 && (
+                              <button style={S.btnMini} onClick={()=>removeMatchPlayer(p.key)}>🗑</button>
+                            )}
+                          </div>
+                          <div style={{display:"flex",gap:8}}>
+                            <select style={{...S.sel,flex:1}} value={p.profileId} onChange={e=>updateMatchPlayer(p.key,"profileId",e.target.value)}>
+                              <option value="">Nessun profilo</option>
+                              {data.profiles.map(pr=><option key={pr.id} value={pr.id}>{pr.avatar} {pr.name}</option>)}
+                            </select>
+                            <select style={{...S.sel,flex:1}} value={p.deckId} onChange={e=>updateMatchPlayer(p.key,"deckId",e.target.value)} disabled={!p.profileId}>
+                              <option value="">Nessun mazzo</option>
+                              {availDecks.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {matchSetupPlayers.length<6 && (
+                      <button style={{...S.btnGhost,width:"100%",marginBottom:14}} onClick={addMatchPlayer}>+ Aggiungi giocatore</button>
+                    )}
+                    <button style={{...S.btnP,width:"100%",padding:13}} onClick={startMatch}>▶️ Inizia partita</button>
+                  </div>
+                )}
+
+                {matchView==="live" && livePlayers && (
+                  <>
+                    <button style={{...S.btnP,width:"100%",padding:13}} onClick={()=>setShowWinnerPicker(true)}>🏁 Termina partita</button>
+                    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                      {livePlayers.map(p => (
+                        <div key={p.id} style={S.panel}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+                            <div>
+                              <div style={{fontWeight:700,fontSize:15}}>{p.name}</div>
+                              {p.deckName && <div style={{fontSize:11,color:"#64748b"}}>{p.deckName}</div>}
+                            </div>
+                            {trackPoison && (
+                              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                <span style={{fontSize:11,color:"#34d399"}}>☠️ {p.poison}</span>
+                                <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
+                                <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
+                              </div>
+                            )}
+                          </div>
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:8}}>
+                            <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-5)}>−5</button>
+                            <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−1</button>
+                            <div style={{fontSize:40,fontWeight:800,minWidth:70,textAlign:"center",color:p.life<=10?"#f87171":"#f8fafc"}}>{p.life}</div>
+                            <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+1</button>
+                            <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,5)}>+5</button>
+                          </div>
+                          {trackCmdDamage && livePlayers.length>1 && (
+                            <div>
+                              <button style={S.statsToggle} onClick={()=>setExpandedCmd(expandedCmd===p.id?null:p.id)}>
+                                ⚔️ Danno comandante {expandedCmd===p.id?"▾":"▸"}
+                              </button>
+                              {expandedCmd===p.id && (
+                                <div style={{marginTop:8}}>
+                                  {livePlayers.filter(o=>o.id!==p.id).map(o=>(
+                                    <div key={o.id} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}>
+                                      <span style={{flex:1,fontSize:12}}>da {o.name}</span>
+                                      <button style={S.btnMini} onClick={()=>adjustCmdDamage(p.id,o.id,-1)}>−</button>
+                                      <span style={{width:20,textAlign:"center",fontWeight:700}}>{p.cmdDamage[o.id]||0}</span>
+                                      <button style={S.btnMini} onClick={()=>adjustCmdDamage(p.id,o.id,1)}>+</button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+                {matchView==="live" && !livePlayers && (
+                  <div style={S.empty}>Nessuna partita in corso. Vai su "Nuova" per iniziarne una.</div>
+                )}
+
+                {matchView==="history" && (
+                  <>
+                    {(() => {
+                      const deckStats = {};
+                      (data.games||[]).forEach(g => g.players.forEach(p => {
+                        if (!p.deckName) return;
+                        deckStats[p.deckName] = deckStats[p.deckName] || { wins:0, losses:0 };
+                        if (g.winnerName===p.name) deckStats[p.deckName].wins++;
+                        else deckStats[p.deckName].losses++;
+                      }));
+                      const entries = Object.entries(deckStats);
+                      return entries.length>0 ? (
+                        <div style={S.panel}>
+                          <div style={S.pt}>Statistiche per mazzo</div>
+                          {entries.map(([name,s])=>(
+                            <div key={name} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"4px 0"}}>
+                              <span>{name}</span>
+                              <span><span style={{color:"#34d399"}}>{s.wins}V</span> — <span style={{color:"#f87171"}}>{s.losses}S</span></span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null;
+                    })()}
+                    {(!data.games || data.games.length===0) && (
+                      <div style={S.empty}><div style={{fontSize:36,marginBottom:10}}>📜</div>Nessuna partita registrata ancora.</div>
+                    )}
+                    {(data.games||[]).map(g => (
+                      <div key={g.id} style={S.panel}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                          <span style={{fontSize:12,color:"#64748b"}}>{g.created_at ? new Date(g.created_at).toLocaleDateString("it-IT") : ""} · {g.format}</span>
+                          <button style={S.btnMini} onClick={()=>handleDeleteGame(g.id)}>🗑</button>
+                        </div>
+                        {g.players.map((p,i)=>(
+                          <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0",
+                            fontWeight:g.winnerName===p.name?700:400,color:g.winnerName===p.name?"#f59e0b":"#e2e8f0"}}>
+                            <span>{g.winnerName===p.name?"🏆 ":""}{p.name}{p.deckName?` (${p.deckName})`:""}</span>
+                            <span>{p.finalLife} vita{p.poison>0?` · ☠️${p.poison}`:""}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {showWinnerPicker && (
+                  <div style={S.modalOverlay} onClick={()=>setShowWinnerPicker(false)}>
+                    <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                      <div style={S.modalHeader}>
+                        <span style={{fontWeight:700}}>🏆 Chi ha vinto?</span>
+                        <button style={S.btnGhost} onClick={()=>setShowWinnerPicker(false)}>✕</button>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                        {livePlayers?.map(p=>(
+                          <button key={p.id} style={{...S.btnP,padding:12}} onClick={()=>finalizeMatch(p.id)}>{p.name}</button>
+                        ))}
+                        <button style={{...S.btnGhost,padding:12}} onClick={()=>finalizeMatch(null)}>Nessuno / pareggio</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ── ADVISOR ── */}
             {tab==="advisor" && (
               <div style={S.col} className="fade-in">
@@ -1935,6 +2212,7 @@
       statsToggle:{padding:"9px",background:"transparent",border:"1px dashed #2d2b3e",color:"#94a3b8",borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:600},
       filterBtn:{position:"relative",padding:"6px 12px",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#e2e8f0",borderRadius:7,cursor:"pointer",fontSize:12,fontWeight:600},
       filterBadge:{marginLeft:5,color:"#f59e0b",fontSize:10},
+      lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
       btnPrice:{display:"block",width:"100%",marginTop:6,padding:"7px",background:"#3a2e1e",color:"#f59e0b",border:"1px solid #92600e",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
       priceLink:{display:"block",padding:"10px 12px",background:"#0e0c16",borderRadius:8,color:"#e2e8f0",fontSize:13,fontWeight:600,textDecoration:"none",border:"1px solid #2d2b3e"},
       btnDel:{marginTop:6,padding:"6px 14px",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,cursor:"pointer",fontSize:12},
