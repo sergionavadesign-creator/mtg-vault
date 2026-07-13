@@ -298,6 +298,45 @@
 
     const BASIC_LAND_NAMES = new Set(["forest","island","mountain","swamp","plains","wastes"]);
     // Controlli di base sulle regole del formato (non sostituisce un giudice, ma segnala le violazioni più comuni)
+    const COLOR_NAMES = { W:"Bianco", U:"Blu", B:"Nero", R:"Rosso", G:"Verde" };
+    const GROUP_PALETTE = ["#1e2233","#2a1e33","#1e332a","#332a1e","#331e28","#1e3333","#2e2a1e"];
+    // Costo di mana convertito, calcolato dalla stringa (es. "{3}{U}{U}" -> 5) senza bisogno di dati aggiuntivi
+    function computeCmc(manaCost) {
+      if (!manaCost) return 0;
+      const symbols = manaCost.match(/\{([^}]+)\}/g) || [];
+      return symbols.reduce((sum,s) => {
+        const inner = s.slice(1,-1);
+        if (/^\d+$/.test(inner)) return sum + parseInt(inner);
+        if (/^[XYZ]$/i.test(inner)) return sum;
+        return sum + 1; // simboli ibridi/phyrexian contano 1
+      }, 0);
+    }
+    function getGroupKey(card, groupBy) {
+      switch(groupBy) {
+        case "mv": { const v = computeCmc(card.manaCost); return v>=7 ? "7+" : String(v); }
+        case "type": { const parts=(card.type||"Altro").split("—")[0].trim().split(" "); return parts[parts.length-1]||"Altro"; }
+        case "set": return card.set || "Sconosciuto";
+        case "color": { const cs=card.colors||[]; return cs.length===0?"Incolore":cs.length>1?"Multicolore":(COLOR_NAMES[cs[0]]||cs[0]); }
+        case "colorIdentity": { const cs=card.colorIdentity?.length?card.colorIdentity:(card.colors||[]); return cs.length===0?"Incolore":cs.length>1?"Multicolore":(COLOR_NAMES[cs[0]]||cs[0]); }
+        default: return null;
+      }
+    }
+    function groupDeckCards(cards, groupBy) {
+      if (groupBy==="none" || !groupBy) return [{ key:null, cards }];
+      const map = {};
+      cards.forEach(c => { const k = getGroupKey(c, groupBy); (map[k] = map[k]||[]).push(c); });
+      let keys = Object.keys(map);
+      if (groupBy==="mv") keys.sort((a,b)=>(a==="7+"?7:+a)-(b==="7+"?7:+b));
+      else keys.sort();
+      return keys.map(k => ({ key:k, cards: map[k] }));
+    }
+    function colorForGroupKey(key, groupBy) {
+      const colorMap = { Bianco:"#33301e", Blu:"#1e2733", Nero:"#241e2c", Rosso:"#331e1e", Verde:"#1e3324", Multicolore:"#332b1e", Incolore:"#242430" };
+      if ((groupBy==="color"||groupBy==="colorIdentity") && colorMap[key]) return colorMap[key];
+      let hash=0; for (const c of String(key)) hash = (hash*31 + c.charCodeAt(0))|0;
+      return GROUP_PALETTE[Math.abs(hash)%GROUP_PALETTE.length];
+    }
+
     function validateDeckRules(deck, cards) {
       const warnings = [];
       if (!deck || !cards.length) return warnings;
@@ -776,6 +815,8 @@
       const [csvResult, setCsvResult] = useState("");
       const [deckViewMode, setDeckViewMode] = useState("list"); // "list" | "grid" — vista pannelli mazzo
       const [pickerOpen, setPickerOpen] = useState(false); // tendina "aggiungi dalla collezione"
+      const [deckGroupBy, setDeckGroupBy] = useState("none");
+      const [showGroupPicker, setShowGroupPicker] = useState(false);
       const [sideboardOpen, setSideboardOpen] = useState(false);
       const [pendingAction, setPendingAction] = useState(null); // modifica in attesa di conferma su mazzo importato
       const [forkName, setForkName] = useState("");
@@ -1644,6 +1685,26 @@
               </div>
             </div>
           )}
+          {showGroupPicker && (
+            <div style={S.modalOverlay} onClick={()=>setShowGroupPicker(false)}>
+              <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>🔀 Raggruppa carte</span>
+                  <button style={S.btnGhost} onClick={()=>setShowGroupPicker(false)}>✕</button>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {[["none","Nessun raggruppamento"],["mv","Costo di mana"],["type","Tipo"],["set","Set"],["color","Colore"],["colorIdentity","Identità colore"]].map(([k,l])=>(
+                    <button key={k} onClick={()=>{setDeckGroupBy(k);setShowGroupPicker(false);}}
+                      style={{padding:"11px 14px",borderRadius:8,border:`1px solid ${deckGroupBy===k?"#f59e0b":"#2d2b3e"}`,
+                        background:deckGroupBy===k?"#1e1b2e":"transparent",color:deckGroupBy===k?"#f59e0b":"#e2e8f0",
+                        textAlign:"left",cursor:"pointer",fontSize:13,fontWeight:deckGroupBy===k?700:400}}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
           {priceCard && (
             <div style={S.modalOverlay} onClick={()=>{setPriceCard(null);setPriceInfo(null);}}>
               <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -1960,14 +2021,19 @@
                         )}
                       </div>
                       <div style={S.panel}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
                           <div style={S.pt}>Mazzo — {deckTotal} carte ({deckCardsLive.length} titoli)</div>
-                          {deckCardsLive.some(c=>c.owned!==undefined) && (
-                            <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
-                              <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
-                              Solo mancanti
-                            </label>
-                          )}
+                          <div style={{display:"flex",alignItems:"center",gap:10}}>
+                            <button style={S.filterBtn} onClick={()=>setShowGroupPicker(true)}>
+                              🔀 {deckGroupBy==="none"?"Raggruppa":{mv:"Costo mana",type:"Tipo",set:"Set",color:"Colore",colorIdentity:"Identità colore"}[deckGroupBy]}
+                            </button>
+                            {deckCardsLive.some(c=>c.owned!==undefined) && (
+                              <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
+                                <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
+                                Solo mancanti
+                              </label>
+                            )}
+                          </div>
                         </div>
                         {deckCardsLive.some(c=>c.owned!==undefined) && (() => {
                           const ownedCopies = deckCardsLive.reduce((s,c) => {
@@ -1988,39 +2054,77 @@
                           );
                         })()}
                         {deckCardsLive.length===0 && <div style={{...S.empty,padding:20}}>Aggiungi carte dalla collezione</div>}
-                        {deckViewMode==="list" && deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
-                          <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e",...(card.isCommander?{background:"#241a08",borderRadius:6,paddingLeft:6}:{})}}>
-                            <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
-                            {card.owned!==undefined && (
-                              <span title={card.owned?"Posseduta":`Possiedi ${card.ownedQty||0} su ${card.qty||1} necessarie`} style={{fontSize:11,display:"flex",alignItems:"center",gap:3}}>
-                                {card.owned?"✅":"❌"}
-                                {!card.owned && <span style={{fontSize:9,color:"#64748b"}}>({card.ownedQty||0}/{card.qty||1})</span>}
-                              </span>
-                            )}
-                            {card.isCommander && <span title="Comandante" style={{fontSize:13}}>👑</span>}
-                            <span style={{flex:1,fontSize:12,fontWeight:card.isCommander?700:400,cursor:"pointer"}} onClick={()=>setDeckCardPopup(card)}>{card.printed_name || card.name}</span>
-                            <span style={{fontSize:10,color:"#64748b",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.type?.split("—")[0]}</span>
-                            {currentDeck.format==="Commander" && canBeCommander(card) && (
-                              <button style={{...S.btnMini,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} title={card.isCommander?"Togli il ruolo di comandante":"Designa come comandante"} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑</button>
-                            )}
-                          </div>
-                        ))}
-                        {deckViewMode==="grid" && (
-                          <div style={S.miniGrid}>
-                            {deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
-                              <div key={card.id} style={{...S.miniTile,...(card.isCommander?{border:"2px solid #f59e0b"}:{})}}>
-                                <div onClick={()=>setDeckCardPopup(card)} style={{cursor:"pointer"}}>
-                                  {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
-                                </div>
-                                {card.isCommander && <span style={{...S.miniQty,left:"auto",right:4,background:"#f59e0b",color:"#0a0a0f"}}>👑</span>}
-                                <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":` ❌ (${card.ownedQty||0}/${card.qty||1})`) : ""}</span>
-                                {currentDeck.format==="Commander" && canBeCommander(card) && (
-                                  <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>{card.isCommander?"👑 Comandante ✕":"👑 Rendi comandante"}</button>
-                                )}
+                        {(() => {
+                          const filtered = deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false);
+                          const commanderCards = filtered.filter(c=>c.isCommander);
+                          const rest = filtered.filter(c=>!c.isCommander);
+                          const groups = groupDeckCards(rest, deckGroupBy);
+
+                          const renderListCard = card => (
+                            <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e",...(card.isCommander?{background:"#241a08",borderRadius:6,paddingLeft:6}:{})}}>
+                              <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
+                              {card.owned!==undefined && (
+                                <span title={card.owned?"Posseduta":`Possiedi ${card.ownedQty||0} su ${card.qty||1} necessarie`} style={{fontSize:11,display:"flex",alignItems:"center",gap:3}}>
+                                  {card.owned?"✅":"❌"}
+                                  {!card.owned && <span style={{fontSize:9,color:"#64748b"}}>({card.ownedQty||0}/{card.qty||1})</span>}
+                                </span>
+                              )}
+                              {card.isCommander && <span title="Comandante" style={{fontSize:13}}>👑</span>}
+                              <span style={{flex:1,fontSize:12,fontWeight:card.isCommander?700:400,cursor:"pointer"}} onClick={()=>setDeckCardPopup(card)}>{card.printed_name || card.name}</span>
+                              <span style={{fontSize:10,color:"#64748b",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.type?.split("—")[0]}</span>
+                              {currentDeck.format==="Commander" && canBeCommander(card) && (
+                                <button style={{...S.btnMini,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} title={card.isCommander?"Togli il ruolo di comandante":"Designa come comandante"} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑</button>
+                              )}
+                            </div>
+                          );
+                          const renderGridCard = card => (
+                            <div key={card.id} style={{...S.miniTile,...(card.isCommander?{border:"2px solid #f59e0b"}:{})}}>
+                              <div onClick={()=>setDeckCardPopup(card)} style={{cursor:"pointer"}}>
+                                {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
                               </div>
-                            ))}
-                          </div>
-                        )}
+                              {card.isCommander && <span style={{...S.miniQty,left:"auto",right:4,background:"#f59e0b",color:"#0a0a0f"}}>👑</span>}
+                              <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":` ❌ (${card.ownedQty||0}/${card.qty||1})`) : ""}</span>
+                              {currentDeck.format==="Commander" && canBeCommander(card) && (
+                                <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>{card.isCommander?"👑 Comandante ✕":"👑 Rendi comandante"}</button>
+                              )}
+                            </div>
+                          );
+
+                          return (
+                            <>
+                              {deckViewMode==="list" && (
+                                <div>
+                                  {commanderCards.map(renderListCard)}
+                                  {groups.map(g => (
+                                    <div key={g.key||"all"}>
+                                      {g.key && (
+                                        <div style={{background:colorForGroupKey(g.key,deckGroupBy),padding:"5px 10px",borderRadius:6,fontSize:11,fontWeight:700,color:"#cbd5e1",margin:"8px 0 4px"}}>
+                                          {g.key} ({g.cards.reduce((s,c)=>s+(c.qty||1),0)})
+                                        </div>
+                                      )}
+                                      {g.cards.map(renderListCard)}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {deckViewMode==="grid" && (
+                                <div>
+                                  {commanderCards.length>0 && <div style={S.miniGrid}>{commanderCards.map(renderGridCard)}</div>}
+                                  {groups.map(g => (
+                                    <div key={g.key||"all"}>
+                                      {g.key && (
+                                        <div style={{background:colorForGroupKey(g.key,deckGroupBy),padding:"5px 10px",borderRadius:6,fontSize:11,fontWeight:700,color:"#cbd5e1",margin:"8px 0 4px"}}>
+                                          {g.key} ({g.cards.reduce((s,c)=>s+(c.qty||1),0)})
+                                        </div>
+                                      )}
+                                      <div style={S.miniGrid}>{g.cards.map(renderGridCard)}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                         {deckCards.length>0 && (
                           <div style={{marginTop:12,padding:10,background:"#0e0c16",borderRadius:7,fontSize:12,display:"flex",justifyContent:"space-between"}}>
                             <span>{deckTotal} carte</span>
