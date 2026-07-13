@@ -976,7 +976,7 @@
         const newCard = {
           id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null,
           set:card.set_name, setCode:card.set, collectorNumber:card.collector_number,
-          rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[], colorIdentity:card.color_identity||[], oracleText:card.oracle_text||card.card_faces?.[0]?.oracle_text||"",
+          rarity:card.rarity, manaCost:card.mana_cost||card.card_faces?.[0]?.mana_cost||"", colors:(card.colors?.length?card.colors:card.card_faces?.[0]?.colors)||[], colorIdentity:card.color_identity||[], oracleText:card.oracle_text||card.card_faces?.[0]?.oracle_text||"",
           type:card.type_line||"", legalities:card.legalities||{}, prices:card.prices||{},
           image:cardImage(card), condition, qty, foil:!!foil, addedAt:new Date().toISOString()
         };
@@ -1462,7 +1462,7 @@
           const newCard = {
             id: crypto.randomUUID(), scryfallId:sc.id, name:sc.name, printed_name:sc.printed_name||null,
             set:sc.set_name, setCode:sc.set, collectorNumber:sc.collector_number,
-            rarity:sc.rarity, manaCost:sc.mana_cost||"", colors:sc.colors||[], colorIdentity:sc.color_identity||[], oracleText:sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
+            rarity:sc.rarity, manaCost:sc.mana_cost||sc.card_faces?.[0]?.mana_cost||"", colors:(sc.colors?.length?sc.colors:sc.card_faces?.[0]?.colors)||[], colorIdentity:sc.color_identity||[], oracleText:sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
             type:sc.type_line||"", legalities:sc.legalities||{}, prices:sc.prices||{},
             image:cardImage(sc), condition:row.condition, qty:row.qty, foil:row.foil, addedAt:new Date().toISOString()
           };
@@ -1567,7 +1567,7 @@
               set: sc?.set_name || "", setCode: sc?.set || "",
               collectorNumber: sc?.collector_number || "",
               rarity: sc?.rarity || "",
-              manaCost: sc?.mana_cost || "", colors: sc?.colors || [], colorIdentity: sc?.color_identity || [], oracleText: sc?.oracle_text || sc?.card_faces?.[0]?.oracle_text || "",
+              manaCost: sc?.mana_cost || sc?.card_faces?.[0]?.mana_cost || "", colors: (sc?.colors?.length?sc.colors:sc?.card_faces?.[0]?.colors) || [], colorIdentity: sc?.color_identity || [], oracleText: sc?.oracle_text || sc?.card_faces?.[0]?.oracle_text || "",
               type: sc?.type_line || "", legalities: sc?.legalities || {}, prices: sc?.prices || {},
               image: sc ? cardImage(sc) : null,
               qty: e.quantity,
