@@ -370,6 +370,10 @@
       const [manualName, setManualName] = useState("");
       const [results, setResults] = useState([]); // lista risultati multipli
       const [resultFilter, setResultFilter] = useState("");
+      const [filterYear, setFilterYear] = useState("All");
+      const [filterLang, setFilterLang] = useState("All");
+      const [filterSet, setFilterSet] = useState("All");
+      const [showFilters, setShowFilters] = useState(false);
       const [hideCrossover, setHideCrossover] = useState(true);
       const [suggestions, setSuggestions] = useState([]); // autocomplete
       const [showSugg, setShowSugg] = useState(false);
@@ -480,28 +484,65 @@
               )}
             </div>
 
-            {/* Status quando ci sono risultati */}
+            {/* Status quando ci sono risultati, con pulsante filtri */}
             {results.length>0 && (
-              <div style={{fontSize:12, color:"#34d399", margin:"10px 0 4px", fontWeight:600}}>{status}</div>
-            )}
-
-            {/* Filtro sui risultati, utile quando sono tante (es. terre base) */}
-            {results.length>6 && (
-              <div style={{marginTop:6}}>
-                <input style={{...S.inp,width:"100%",marginBottom:8}} placeholder="Filtra per nome set…"
-                  value={resultFilter} onChange={e=>setResultFilter(e.target.value)} />
-                <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                  <input type="checkbox" checked={hideCrossover} onChange={e=>setHideCrossover(e.target.checked)} />
-                  Nascondi set crossover (Marvel, Avatar, TMNT…)
-                </label>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"10px 0 4px"}}>
+                <span style={{fontSize:12, color:"#34d399", fontWeight:600}}>{status}</span>
+                {results.length>6 && (
+                  <button style={S.filterBtn} onClick={()=>setShowFilters(true)}>
+                    ⚙️ Filtri{(filterYear!=="All"||filterLang!=="All"||filterSet!=="All"||hideCrossover) && <span style={S.filterBadge}>●</span>}
+                  </button>
+                )}
               </div>
             )}
+
+            {showFilters && (() => {
+              const years = [...new Set(results.map(c => c.released_at?.slice(0,4)).filter(Boolean))].sort().reverse();
+              const langs = [...new Set(results.map(c => c.lang).filter(Boolean))];
+              const langFlags = {en:"🇬🇧",it:"🇮🇹",fr:"🇫🇷",de:"🇩🇪",es:"🇪🇸",pt:"🇵🇹",ja:"🇯🇵",ko:"🇰🇷",ru:"🇷🇺",zhs:"🇨🇳",zht:"🇨🇳"};
+              const sets = [...new Set(results.map(c => c.set_name).filter(Boolean))].sort();
+              return (
+                <div style={S.modalOverlay} onClick={()=>setShowFilters(false)}>
+                  <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                    <div style={S.modalHeader}>
+                      <span style={{fontWeight:700}}>⚙️ Filtra risultati</span>
+                      <button style={S.btnGhost} onClick={()=>setShowFilters(false)}>✕</button>
+                    </div>
+                    <label style={S.lbl}>Anno</label>
+                    <select style={{...S.sel,width:"100%",marginBottom:12}} value={filterYear} onChange={e=>setFilterYear(e.target.value)}>
+                      <option value="All">Tutti gli anni</option>
+                      {years.map(y => <option key={y} value={y}>{y}</option>)}
+                    </select>
+                    <label style={S.lbl}>Lingua</label>
+                    <select style={{...S.sel,width:"100%",marginBottom:12}} value={filterLang} onChange={e=>setFilterLang(e.target.value)}>
+                      <option value="All">Tutte le lingue</option>
+                      {langs.map(l => <option key={l} value={l}>{langFlags[l]||""} {l.toUpperCase()}</option>)}
+                    </select>
+                    <label style={S.lbl}>Edizione</label>
+                    <select style={{...S.sel,width:"100%",marginBottom:14}} value={filterSet} onChange={e=>setFilterSet(e.target.value)}>
+                      <option value="All">Tutte le edizioni</option>
+                      {sets.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+                      <input type="checkbox" checked={hideCrossover} onChange={e=>setHideCrossover(e.target.checked)} />
+                      Nascondi set crossover (Marvel, Avatar, TMNT…)
+                    </label>
+                    <div style={{display:"flex",gap:10}}>
+                      <button style={{...S.btnP,flex:1}} onClick={()=>setShowFilters(false)}>Applica</button>
+                      <button style={{...S.btnGhost,flex:1}} onClick={()=>{setFilterYear("All");setFilterLang("All");setFilterSet("All");setHideCrossover(true);}}>Reimposta</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Lista risultati */}
             {results.length>0 && (
               <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}}>
                 {results
-                  .filter(card => !resultFilter || (card.set_name||"").toLowerCase().includes(resultFilter.toLowerCase()))
+                  .filter(card => filterYear==="All" || card.released_at?.slice(0,4)===filterYear)
+                  .filter(card => filterLang==="All" || card.lang===filterLang)
+                  .filter(card => filterSet==="All" || card.set_name===filterSet)
                   .filter(card => !hideCrossover || !CROSSOVER_KEYWORDS.some(k => (card.set_name||"").toLowerCase().includes(k)))
                   .map(card => {
                   const year = card.released_at ? card.released_at.slice(0,4) : "";
@@ -1892,6 +1933,8 @@
       foilToggle:{display:"block",width:"100%",padding:"10px",background:"#0e0c16",color:"#94a3b8",border:"1px solid #2d2b3e",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:600},
       foilToggleOn:{background:"linear-gradient(135deg,#a78bfa,#34d399,#f59e0b)",color:"#0a0a0f",border:"1px solid transparent"},
       statsToggle:{padding:"9px",background:"transparent",border:"1px dashed #2d2b3e",color:"#94a3b8",borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:600},
+      filterBtn:{position:"relative",padding:"6px 12px",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#e2e8f0",borderRadius:7,cursor:"pointer",fontSize:12,fontWeight:600},
+      filterBadge:{marginLeft:5,color:"#f59e0b",fontSize:10},
       btnPrice:{display:"block",width:"100%",marginTop:6,padding:"7px",background:"#3a2e1e",color:"#f59e0b",border:"1px solid #92600e",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
       priceLink:{display:"block",padding:"10px 12px",background:"#0e0c16",borderRadius:8,color:"#e2e8f0",fontSize:13,fontWeight:600,textDecoration:"none",border:"1px solid #2d2b3e"},
       btnDel:{marginTop:6,padding:"6px 14px",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,cursor:"pointer",fontSize:12},
