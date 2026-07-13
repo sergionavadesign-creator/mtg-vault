@@ -1873,7 +1873,7 @@
               </button>
             </div>
             <nav style={S.nav}>
-              {[["home","🏠 Home"],["collection","🃏 Collezione"],["decks","⚔️ Mazzi"],["match","🎮 Partita"],["advisor","🤖 AI Advisor"]].map(([k,l]) => (
+              {[["collection","🃏 Collezione"],["decks","⚔️ Mazzi"],["match","🎮 Partita"],["advisor","🤖 AI Advisor"]].map(([k,l]) => (
                 <button key={k} onClick={() => setTab(k)} style={{...S.navBtn,...(tab===k?S.navActive:{})}}>
                   {l}
                 </button>
@@ -2110,11 +2110,14 @@
                         ))}
                       </div>
                     )}
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
-                      <button style={S.filterBtn} onClick={()=>setShowDeckStats(true)}>📊 Statistiche mazzo</button>
-                      <div style={S.viewToggle}>
-                        <button style={{...S.viewBtn,...(deckViewMode==="list"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("list")}>☰ Lista</button>
-                        <button style={{...S.viewBtn,...(deckViewMode==="grid"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("grid")}>▦ Anteprima</button>
+                    <div style={S.deckToolbar}>
+                      <button style={S.toolbarBtn} onClick={()=>setShowDeckStats(true)}>📊 Statistiche</button>
+                      <button style={S.toolbarBtn} onClick={()=>setShowGroupPicker(true)}>
+                        🔀 {deckGroupBy==="none"?"Raggruppa":{mv:"Costo mana",type:"Tipo",set:"Set",color:"Colore",colorIdentity:"Identità colore"}[deckGroupBy]}
+                      </button>
+                      <div style={{...S.viewToggle,marginLeft:"auto"}}>
+                        <button style={{...S.viewBtn,...(deckViewMode==="list"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("list")}>☰</button>
+                        <button style={{...S.viewBtn,...(deckViewMode==="grid"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("grid")}>▦</button>
                       </div>
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -2160,18 +2163,13 @@
                       </div>
                       <div style={S.panel}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,flexWrap:"wrap",gap:8}}>
-                          <div style={S.pt}>Mazzo — {deckTotal} carte ({deckCardsLive.length} titoli)</div>
-                          <div style={{display:"flex",alignItems:"center",gap:10}}>
-                            <button style={S.filterBtn} onClick={()=>setShowGroupPicker(true)}>
-                              🔀 {deckGroupBy==="none"?"Raggruppa":{mv:"Costo mana",type:"Tipo",set:"Set",color:"Colore",colorIdentity:"Identità colore"}[deckGroupBy]}
-                            </button>
-                            {deckCardsLive.some(c=>c.owned!==undefined) && (
-                              <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
-                                <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
-                                Solo mancanti
-                              </label>
-                            )}
-                          </div>
+                          <div style={S.pt}>Mazzo ({deckCardsLive.length} titoli)</div>
+                          {deckCardsLive.some(c=>c.owned!==undefined) && (
+                            <label style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
+                              <input type="checkbox" checked={moxOnlyMissing} onChange={e=>setMoxOnlyMissing(e.target.checked)} />
+                              Solo mancanti
+                            </label>
+                          )}
                         </div>
                         {deckCardsLive.some(c=>c.owned!==undefined) && (() => {
                           const ownedCopies = deckCardsLive.reduce((s,c) => {
@@ -2769,6 +2767,8 @@
       statsToggle:{padding:"9px",background:"transparent",border:"1px dashed #2d2b3e",color:"#94a3b8",borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:600},
       homeTile:{background:"#12101a",border:"1px solid #1e1b2e",borderRadius:16,padding:"26px 12px",textAlign:"center",cursor:"pointer",color:"#f8fafc"},
       filterBtn:{position:"relative",padding:"6px 12px",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#e2e8f0",borderRadius:7,cursor:"pointer",fontSize:12,fontWeight:600},
+      deckToolbar:{display:"flex",alignItems:"center",gap:8,marginBottom:14,overflowX:"auto",paddingBottom:2},
+      toolbarBtn:{flexShrink:0,padding:"7px 12px",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#e2e8f0",borderRadius:7,cursor:"pointer",fontSize:12,fontWeight:600,whiteSpace:"nowrap"},
       filterBadge:{marginLeft:5,color:"#f59e0b",fontSize:10},
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
       tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
