@@ -291,7 +291,9 @@
     // dover leggere il testo oracle completo.
     function canBeCommander(card) {
       const t = (card?.type||"").toLowerCase();
-      return t.includes("legendary") && (t.includes("creature") || t.includes("planeswalker"));
+      const isLegendaryCreature = t.includes("legendary") && t.includes("creature");
+      const explicitlyAllowed = (card?.oracleText||"").toLowerCase().includes("can be your commander");
+      return isLegendaryCreature || explicitlyAllowed;
     }
 
     const BASIC_LAND_NAMES = new Set(["forest","island","mountain","swamp","plains","wastes"]);
@@ -749,6 +751,21 @@
       const [expandedCmd, setExpandedCmd] = useState(null); // id giocatore con pannello danno comandante aperto
       const [showWinnerPicker, setShowWinnerPicker] = useState(false);
       const [tableMode, setTableMode] = useState(false);
+      const [bgPickerFor, setBgPickerFor] = useState(null);
+      const [matchSettingsOpen, setMatchSettingsOpen] = useState(false);
+      const [autoKO, setAutoKO] = useState(true);
+      const [turnTimerEnabled, setTurnTimerEnabled] = useState(false);
+      const [turnSeconds, setTurnSeconds] = useState(0);
+      const [timerRunning, setTimerRunning] = useState(false);
+      const [turnPlayerIdx, setTurnPlayerIdx] = useState(0);
+      const [undoStack, setUndoStack] = useState([]);
+      const [diceResult, setDiceResult] = useState(null);
+
+      useEffect(() => {
+        if (!timerRunning) return;
+        const id = setInterval(()=>setTurnSeconds(s=>s+1), 1000);
+        return () => clearInterval(id);
+      }, [timerRunning]);
       const [csvText, setCsvText] = useState("");
       const [csvImporting, setCsvImporting] = useState(false);
       const [csvResult, setCsvResult] = useState("");
@@ -788,6 +805,9 @@
       // Trova il prezzo migliore di una carta
       const [priceCard, setPriceCard] = useState(null);
       const [deckCardPopup, setDeckCardPopup] = useState(null);
+      const [showSaveDeckPopup, setShowSaveDeckPopup] = useState(false);
+      const [saveDeckName, setSaveDeckName] = useState("");
+      const [savingAiDeck, setSavingAiDeck] = useState(false);
       const [priceInfo, setPriceInfo] = useState(null);
       const [priceLoading, setPriceLoading] = useState(false);
       const [priceError, setPriceError] = useState("");
@@ -816,7 +836,7 @@
         const newCard = {
           id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null,
           set:card.set_name, setCode:card.set, collectorNumber:card.collector_number,
-          rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[], colorIdentity:card.color_identity||[],
+          rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[], colorIdentity:card.color_identity||[], oracleText:card.oracle_text||card.card_faces?.[0]?.oracle_text||"",
           type:card.type_line||"", legalities:card.legalities||{}, prices:card.prices||{},
           image:cardImage(card), condition, qty, foil:!!foil, addedAt:new Date().toISOString()
         };
@@ -983,28 +1003,71 @@
         const players = matchSetupPlayers.map(p => {
           const profile = data.profiles.find(pr => pr.id===p.profileId);
           const deck = data.decks.find(d => d.id===p.deckId);
+          const commanderCard = deck?.cards?.find(c=>c.isCommander);
+          const bgImage = (matchFormat==="Commander" && commanderCard?.image) ? commanderCard.image : null;
           return {
             id: p.key, name: p.name.trim() || profile?.name || `Giocatore ${p.key}`,
             profileId: p.profileId||null, deckId: p.deckId||null, deckName: deck?.name||null,
-            life: matchStartLife, poison: 0, cmdDamage: {}
+            life: matchStartLife, poison: 0, cmdDamage: {}, bgImage
           };
         });
         setLivePlayers(players);
         setMatchView("live");
+        setUndoStack([]); setTurnSeconds(0); setTimerRunning(false); setTurnPlayerIdx(0); setDiceResult(null);
+      }
+      function updatePlayerBg(playerId, image) {
+        setLivePlayers(ps => ps.map(p => p.id===playerId ? { ...p, bgImage: image } : p));
+        setBgPickerFor(null);
+      }
+      function pushUndo() {
+        setUndoStack(st => [...st.slice(-19), livePlayers]);
+      }
+      function undoLast() {
+        setUndoStack(st => {
+          if (!st.length) return st;
+          setLivePlayers(st[st.length-1]);
+          return st.slice(0,-1);
+        });
       }
       function adjustLife(id, delta) {
+        pushUndo();
         setLivePlayers(ps => ps.map(p => p.id===id ? { ...p, life: p.life+delta } : p));
       }
       function adjustPoison(id, delta) {
+        pushUndo();
         setLivePlayers(ps => ps.map(p => p.id===id ? { ...p, poison: Math.max(0,p.poison+delta) } : p));
       }
       function adjustCmdDamage(targetId, fromId, delta) {
+        pushUndo();
         setLivePlayers(ps => ps.map(p => {
           if (p.id!==targetId) return p;
           const cur = p.cmdDamage[fromId]||0;
           const next = Math.max(0, cur+delta);
           return { ...p, cmdDamage: { ...p.cmdDamage, [fromId]: next }, life: p.life - delta };
         }));
+      }
+      function isPlayerKO(p) {
+        if (!autoKO) return false;
+        if (p.life<=0) return true;
+        if ((p.poison||0)>=10) return true;
+        if (Object.values(p.cmdDamage||{}).some(d=>d>=21)) return true;
+        return false;
+      }
+      function rollDice(sides) { setDiceResult(`🎲 D${sides}: ${1+Math.floor(Math.random()*sides)}`); }
+      function rollCoin() { setDiceResult(Math.random()<0.5 ? "🪙 Testa" : "🪙 Croce"); }
+      function pickRandomStarter() {
+        if (!livePlayers?.length) return;
+        const idx = Math.floor(Math.random()*livePlayers.length);
+        setTurnPlayerIdx(idx);
+        setDiceResult(`🎯 Inizia: ${livePlayers[idx].name}`);
+      }
+      function nextTurn() {
+        setTurnPlayerIdx(idx => (idx+1) % (livePlayers?.length||1));
+        setTurnSeconds(0);
+      }
+      function formatTurnTime(s) {
+        const m = Math.floor(s/60), sec = s%60;
+        return `${m}:${sec.toString().padStart(2,"0")}`;
       }
       async function finalizeMatch(winnerId) {
         const winner = livePlayers.find(p=>p.id===winnerId);
@@ -1016,6 +1079,7 @@
         const ok = await saveGame(game);
         if (ok) persist({ ...data, games: [game, ...(data.games||[])] });
         setShowWinnerPicker(false); setLivePlayers(null); setMatchView("history");
+        setUndoStack([]); setTimerRunning(false);
       }
       async function handleDeleteGame(id) {
         await deleteGame(id);
@@ -1079,13 +1143,14 @@
         setAdvising(true); setAdvisorResult(null);
         const summary = deck.cards.map(c => `${c.qty||1}x ${c.name} (${c.type}, ${c.manaCost})`).join("\n");
         const prompt = "Sei un esperto di Magic: The Gathering. Analizza questo mazzo in formato "+deck.format+" e suggerisci miglioramenti concreti.\n\n"+
+          "IMPORTANTE: rispondi in modo diretto e conciso, senza commenti introduttivi o premesse. Vai dritto alla sezione **Analisi del mazzo**.\n\n"+
           "MAZZO ATTUALE:\n"+(summary||"(mazzo vuoto)")+"\n\n"+
           "BUDGET MASSIMO: €"+budget+"\n\n"+
-          "Rispondi in italiano con:\n"+
-          "**Analisi del mazzo**\n(punti di forza e debolezze)\n\n"+
-          "**Carte da rimuovere**\n- Nome carta — motivazione\n\n"+
+          "Rispondi in italiano, in modo sintetico, con ESATTAMENTE questa struttura:\n"+
+          "**Analisi del mazzo**\n(massimo 3 righe: punti di forza e debolezze)\n\n"+
+          "**Carte da rimuovere**\n- Nome carta — motivazione breve\n\n"+
           "**Carte da aggiungere**\n- Nome carta — €X stimato — link Cardmarket\n\n"+
-          "**Strategia consigliata**\n(2-3 righe)\n\n"+
+          "**Strategia consigliata**\n(massimo 2-3 righe)\n\n"+
           "Budget rigoroso: €"+budget+". Solo carte legali in "+deck.format+".";
 
         try {
@@ -1124,14 +1189,15 @@
 
         const styleDesc = deckStyleDesc.trim() ? "\nDettagli aggiuntivi: "+deckStyleDesc : "";
         const prompt = "Sei un esperto costruttore di mazzi Magic: The Gathering.\n\n"+
+          "IMPORTANTE: rispondi in modo diretto e conciso. NON commentare la richiesta, NON fare premesse, NON esprimere opinioni sulla collezione. Vai dritto al contenuto richiesto, iniziando subito dalla sezione **Lista mazzo**.\n\n"+
           "CARTE DISPONIBILI IN COLLEZIONE:\n"+allCards+"\n\n"+
           "FORMATO: "+buildFormat+"\n"+
           "STILE DI GIOCO RICHIESTO: "+deckStyle+styleDesc+"\n\n"+
           "Costruisci il miglior mazzo possibile usando SOLO le carte elencate sopra.\n\n"+
-          "Rispondi in italiano con:\n"+
-          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa)\n\n"+
-          "**Strategia del mazzo**\n(come funziona, win condition, piano di gioco)\n\n"+
-          "**Carte chiave**\n(le 3-5 carte più importanti e perché)\n\n"+
+          "Rispondi in italiano, in modo sintetico, con ESATTAMENTE questa struttura:\n"+
+          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa, una riga per carta, senza descrizioni)\n\n"+
+          "**Strategia del mazzo**\n(massimo 3 righe: come funziona, win condition)\n\n"+
+          "**Carte chiave**\n(le 3-5 carte più importanti, una riga ciascuna)\n\n"+
           "**Carte escluse dalla collezione**\n(max 3 carte che mancano e migliorerebbero il mazzo, con prezzo stimato)\n\n"+
           "Rispetta le regole del formato "+buildFormat+" (numero carte, ban list, ecc.).";
 
@@ -1140,6 +1206,46 @@
           setBuildResult(text || "Nessuna risposta.");
         } catch (e) { setBuildResult(e.message || "Errore di connessione. Riprova."); }
         setBuilding(false);
+      }
+
+      // Estrae il contenuto di una sezione **Titolo** dal testo generato dall'IA
+      function extractAiSection(text, header) {
+        const re = new RegExp("\\*\\*"+header+"\\*\\*([\\s\\S]*?)(\\n\\*\\*|$)");
+        const m = text.match(re);
+        return m ? m[1] : "";
+      }
+      // Estrae righe tipo "3x Nome Carta" / "3 Nome Carta" / "- 3x Nome Carta"
+      function parseAiDeckList(section) {
+        return section.split("\n").map(l=>l.trim()).filter(Boolean)
+          .map(l => {
+            const m = l.match(/^-?\s*(\d+)\s*x?\s+(.+)$/i);
+            if (!m) return null;
+            return { qty: parseInt(m[1]), name: m[2].trim() };
+          }).filter(Boolean);
+      }
+
+      async function saveAiDeckAsReal() {
+        setSavingAiDeck(true);
+        const section = extractAiSection(buildResult, "Lista mazzo");
+        const lines = parseAiDeckList(section);
+        if (lines.length === 0) {
+          alert("Non sono riuscito a leggere la lista carte dalla risposta dell'IA. Riprova a costruire il mazzo.");
+          setSavingAiDeck(false); return;
+        }
+        const cardsOut = [];
+        const missed = [];
+        lines.forEach(({qty,name}) => {
+          const match = collection.find(c =>
+            c.name.toLowerCase()===name.toLowerCase() || (c.printed_name||"").toLowerCase()===name.toLowerCase());
+          if (!match) { missed.push(name); return; }
+          cardsOut.push({ ...match, id: crypto.randomUUID(), qty });
+        });
+        const deck = { id: crypto.randomUUID(), name: saveDeckName.trim()||"Mazzo AI", format: buildFormat, cards: cardsOut, ownerId: activeProfileId, isImported: false };
+        await saveDeck(deck);
+        persist({ ...data, decks: [...data.decks, deck] });
+        setShowSaveDeckPopup(false); setSaveDeckName(""); setSavingAiDeck(false);
+        setTab("decks"); setActiveDeck(deck.id); setDeckView("build");
+        if (missed.length) alert(`Il mazzo è stato creato, ma queste carte suggerite dall'IA non sono state trovate nella tua collezione e sono state saltate: ${missed.join(", ")}`);
       }
 
       // ── IMPORTA COLLEZIONE DA CSV ──────────────────────────
@@ -1205,7 +1311,7 @@
           const newCard = {
             id: crypto.randomUUID(), scryfallId:sc.id, name:sc.name, printed_name:sc.printed_name||null,
             set:sc.set_name, setCode:sc.set, collectorNumber:sc.collector_number,
-            rarity:sc.rarity, manaCost:sc.mana_cost||"", colors:sc.colors||[], colorIdentity:sc.color_identity||[],
+            rarity:sc.rarity, manaCost:sc.mana_cost||"", colors:sc.colors||[], colorIdentity:sc.color_identity||[], oracleText:sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
             type:sc.type_line||"", legalities:sc.legalities||{}, prices:sc.prices||{},
             image:cardImage(sc), condition:row.condition, qty:row.qty, foil:row.foil, addedAt:new Date().toISOString()
           };
@@ -1310,7 +1416,7 @@
               set: sc?.set_name || "", setCode: sc?.set || "",
               collectorNumber: sc?.collector_number || "",
               rarity: sc?.rarity || "",
-              manaCost: sc?.mana_cost || "", colors: sc?.colors || [], colorIdentity: sc?.color_identity || [],
+              manaCost: sc?.mana_cost || "", colors: sc?.colors || [], colorIdentity: sc?.color_identity || [], oracleText: sc?.oracle_text || sc?.card_faces?.[0]?.oracle_text || "",
               type: sc?.type_line || "", legalities: sc?.legalities || {}, prices: sc?.prices || {},
               image: sc ? cardImage(sc) : null,
               qty: e.quantity,
@@ -1473,6 +1579,25 @@
                   <button style={{...S.btnGhost,width:"100%",padding:12}} onClick={applyToOriginalDeck}>✏️ Modifica l'originale</button>
                   <button style={{...S.btnGhost,width:"100%",padding:12}} onClick={()=>{setPendingAction(null);setForkName("");}}>Annulla</button>
                 </div>
+              </div>
+            </div>
+          )}
+          {showSaveDeckPopup && (
+            <div style={S.modalOverlay} onClick={()=>{if(!savingAiDeck)setShowSaveDeckPopup(false);}}>
+              <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>💾 Salva come mazzo</span>
+                  <button style={S.btnGhost} onClick={()=>setShowSaveDeckPopup(false)}>✕</button>
+                </div>
+                <label style={S.lbl}>Nome del mazzo</label>
+                <input style={{...S.inp,width:"100%",marginBottom:16}} placeholder="Es. Mazzo Aggro Rosso"
+                  value={saveDeckName} onChange={e=>setSaveDeckName(e.target.value)} autoFocus />
+                <div style={{fontSize:11,color:"#64748b",marginBottom:16}}>
+                  Verrà creato un mazzo "{buildFormat}" con le carte suggerite, prese dalla tua collezione. Potrai modificarlo liberamente dopo.
+                </div>
+                <button style={{...S.btnP,width:"100%",padding:13}} onClick={saveAiDeckAsReal} disabled={savingAiDeck || !saveDeckName.trim()}>
+                  {savingAiDeck ? "⏳ Creo il mazzo…" : "✅ Crea mazzo"}
+                </button>
               </div>
             </div>
           )}
@@ -1990,21 +2115,39 @@
                       <button style={{...S.btnP,flex:1,padding:13}} onClick={()=>setShowWinnerPicker(true)}>🏁 Termina partita</button>
                       <button style={{...S.btnGhost,padding:13}} onClick={()=>setTableMode(true)}>🔄 Tavolo</button>
                     </div>
+                    <div style={{display:"flex",gap:10}}>
+                      <button style={{...S.btnGhost,flex:1,padding:10}} onClick={()=>setMatchSettingsOpen(true)}>⚙️ Impostazioni</button>
+                      <button style={{...S.btnGhost,padding:10}} onClick={undoLast} disabled={undoStack.length===0}>↩️ Annulla</button>
+                    </div>
+                    {turnTimerEnabled && (
+                      <div style={{display:"flex",alignItems:"center",gap:10,background:"#12101a",border:"1px solid #1e1b2e",borderRadius:10,padding:"8px 12px"}}>
+                        <span style={{fontSize:12,color:"#94a3b8",flex:1}}>Turno di <b style={{color:"#f8fafc"}}>{livePlayers[turnPlayerIdx]?.name}</b></span>
+                        <span style={{fontSize:16,fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{formatTurnTime(turnSeconds)}</span>
+                        <button style={S.btnMini} onClick={()=>setTimerRunning(r=>!r)}>{timerRunning?"⏸":"▶️"}</button>
+                        <button style={S.btnMini} onClick={nextTurn}>⏭</button>
+                      </div>
+                    )}
                     <div style={{display:"flex",flexDirection:"column",gap:12}}>
                       {livePlayers.map(p => (
-                        <div key={p.id} style={S.panel}>
+                        <div key={p.id} style={{...S.panel,position:"relative",overflow:"hidden",
+                          ...(isPlayerKO(p)?{opacity:.5}:{}),
+                          ...(p.bgImage?{backgroundImage:`linear-gradient(rgba(10,10,15,.55),rgba(10,10,15,.8)), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}:{})}}>
+                          {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
                           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
                             <div>
                               <div style={{fontWeight:700,fontSize:15}}>{p.name}</div>
-                              {p.deckName && <div style={{fontSize:11,color:"#64748b"}}>{p.deckName}</div>}
+                              {p.deckName && <div style={{fontSize:11,color:"#94a3b8"}}>{p.deckName}</div>}
                             </div>
-                            {trackPoison && (
-                              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                                <span style={{fontSize:11,color:"#34d399"}}>☠️ {p.poison}</span>
-                                <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
-                                <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
-                              </div>
-                            )}
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              {trackPoison && (
+                                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                  <span style={{fontSize:11,color:"#34d399"}}>☠️ {p.poison}</span>
+                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
+                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
+                                </div>
+                              )}
+                              <button style={S.btnMini} title="Cambia sfondo" onClick={()=>setBgPickerFor(p.id)}>🖼️</button>
+                            </div>
                           </div>
                           <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:8}}>
                             <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-5)}>−5</button>
@@ -2112,7 +2255,11 @@
                         {livePlayers.map((p,i) => {
                           const rotated = i < n/2;
                           return (
-                            <div key={p.id} style={{...S.tableCell, transform: rotated?"rotate(180deg)":"none"}}>
+                            <div key={p.id} style={{...S.tableCell, transform: rotated?"rotate(180deg)":"none",
+                              ...(isPlayerKO(p)?{opacity:.45}:{}),
+                              ...(p.bgImage?{backgroundImage:`linear-gradient(rgba(10,10,15,.5),rgba(10,10,15,.8)), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}:{})}}>
+                              {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
+                              <button style={S.tableBgBtn} onClick={()=>setBgPickerFor(p.id)}>🖼️</button>
                               <div style={{fontWeight:700,fontSize:14,marginBottom:2}}>{p.name}</div>
                               {p.deckName && <div style={{fontSize:10,color:"#94a3b8",marginBottom:6}}>{p.deckName}</div>}
                               <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
@@ -2132,6 +2279,68 @@
                         })}
                       </div>
                       <button style={S.tableExitBtn} onClick={()=>setTableMode(false)}>✕ Esci dalla modalità tavolo</button>
+                    </div>
+                  );
+                })()}
+
+                {matchSettingsOpen && (
+                  <div style={S.modalOverlay} onClick={()=>{setMatchSettingsOpen(false);setDiceResult(null);}}>
+                    <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                      <div style={S.modalHeader}>
+                        <span style={{fontWeight:700}}>⚙️ Impostazioni partita</span>
+                        <button style={S.btnGhost} onClick={()=>{setMatchSettingsOpen(false);setDiceResult(null);}}>✕</button>
+                      </div>
+
+                      <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+                        <input type="checkbox" checked={autoKO} onChange={e=>setAutoKO(e.target.checked)} />
+                        ☠️ Auto-KO (0 vita, 10 veleno o 21 danno comandante)
+                      </label>
+                      <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+                        <input type="checkbox" checked={turnTimerEnabled} onChange={e=>setTurnTimerEnabled(e.target.checked)} />
+                        ⏱️ Mostra timer del turno
+                      </label>
+
+                      <div style={S.pt}>Giocatore iniziale</div>
+                      <button style={{...S.btnGhost,width:"100%",marginBottom:16}} onClick={pickRandomStarter}>🎯 Scegli a caso chi inizia</button>
+
+                      <div style={S.pt}>Dadi e moneta</div>
+                      <div style={{display:"flex",gap:8,marginBottom:12}}>
+                        <button style={{...S.btnGhost,flex:1}} onClick={()=>rollDice(6)}>🎲 D6</button>
+                        <button style={{...S.btnGhost,flex:1}} onClick={()=>rollDice(20)}>🎲 D20</button>
+                        <button style={{...S.btnGhost,flex:1}} onClick={rollCoin}>🪙 Moneta</button>
+                      </div>
+                      {diceResult && (
+                        <div style={{textAlign:"center",fontSize:22,fontWeight:800,padding:"14px 0",color:"#f59e0b"}}>{diceResult}</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {bgPickerFor && (() => {
+                  const player = livePlayers?.find(p=>p.id===bgPickerFor);
+                  const deck = data.decks.find(d=>d.id===player?.deckId);
+                  const sourceCards = (deck?.cards?.length ? deck.cards : (data.profiles.find(pr=>pr.id===player?.profileId)?.cards || [])).filter(c=>c.image);
+                  return (
+                    <div style={S.modalOverlay} onClick={()=>setBgPickerFor(null)}>
+                      <div style={{...S.modalBox,maxHeight:"80vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                        <div style={S.modalHeader}>
+                          <span style={{fontWeight:700}}>🖼️ Sfondo per {player?.name}</span>
+                          <button style={S.btnGhost} onClick={()=>setBgPickerFor(null)}>✕</button>
+                        </div>
+                        {player?.bgImage && (
+                          <button style={{...S.btnGhost,width:"100%",marginBottom:12}} onClick={()=>updatePlayerBg(bgPickerFor,null)}>Rimuovi sfondo</button>
+                        )}
+                        {sourceCards.length===0 && (
+                          <div style={{...S.empty,padding:20}}>Nessuna immagine disponibile — collega un mazzo o un profilo con carte a questo giocatore.</div>
+                        )}
+                        <div style={S.miniGrid}>
+                          {sourceCards.map(c=>(
+                            <div key={c.id} style={S.miniTile} onClick={()=>updatePlayerBg(bgPickerFor,c.image)}>
+                              <img src={c.image} alt={c.name} style={S.miniImg}/>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   );
                 })()}
@@ -2231,6 +2440,9 @@
                       <div style={{...S.panel,borderColor:"#1a3a2a"}} className="fade-in">
                         <div style={{fontSize:13,fontWeight:700,color:"#34d399",marginBottom:14}}>⚡ Mazzo costruito</div>
                         {renderAdvisor(buildResult)}
+                        <button style={{...S.btnP,width:"100%",padding:12,marginTop:10}} onClick={()=>setShowSaveDeckPopup(true)}>
+                          💾 Salva come mazzo
+                        </button>
                       </div>
                     )}
                   </>
@@ -2299,7 +2511,9 @@
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
       tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
       tableGrid:{flex:1,display:"grid",gap:2},
-      tableCell:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#12101a",border:"1px solid #1e1b2e",padding:10,overflow:"hidden"},
+      tableCell:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#12101a",border:"1px solid #1e1b2e",padding:10,overflow:"hidden",position:"relative"},
+      tableBgBtn:{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:"50%",background:"rgba(10,10,15,.7)",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:12,cursor:"pointer"},
+      koBadge:{position:"absolute",top:8,left:"50%",transform:"translateX(-50%)",background:"#7f1d1d",color:"#fca5a5",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:12,zIndex:2},
       tableExitBtn:{padding:12,background:"#1e1b2e",color:"#94a3b8",border:"none",borderTop:"1px solid #2d2b3e",fontSize:12,fontWeight:600},
       btnPrice:{display:"block",width:"100%",marginTop:6,padding:"7px",background:"#3a2e1e",color:"#f59e0b",border:"1px solid #92600e",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
       priceLink:{display:"block",padding:"10px 12px",background:"#0e0c16",borderRadius:8,color:"#e2e8f0",fontSize:13,fontWeight:600,textDecoration:"none",border:"1px solid #2d2b3e"},
