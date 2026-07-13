@@ -758,6 +758,99 @@
       );
     }
 
+    const CARD_COLOR_HEX = { Bianco:"#e8e4c9", Blu:"#4e9af1", Nero:"#a78bd6", Rosso:"#f87171", Verde:"#34d399", Multicolore:"#f59e0b", Incolore:"#94a3b8" };
+    function buildConicGradient(segments) {
+      const total = segments.reduce((s,x)=>s+x.value,0) || 1;
+      let acc = 0;
+      const stops = segments.map(seg => {
+        const start = acc/total*360; acc += seg.value; const end = acc/total*360;
+        return `${seg.color} ${start}deg ${end}deg`;
+      });
+      return `conic-gradient(${stops.join(",")})`;
+    }
+    function DeckStatsPanel({ cards }) {
+      const nonLands = cards.filter(c => !(c.type||"").toLowerCase().includes("land"));
+      const buckets = [0,1,2,3,4,5,6,"7+"];
+      const colorKeys = ["Bianco","Blu","Nero","Rosso","Verde","Multicolore","Incolore"];
+      const curveData = buckets.map(b => {
+        const matching = nonLands.filter(c => { const v=computeCmc(c.manaCost); return b==="7+" ? v>=7 : v===b; });
+        const byColor = {};
+        matching.forEach(c => { const k=getGroupKey(c,"color"); byColor[k]=(byColor[k]||0)+(c.qty||1); });
+        const count = matching.reduce((s,c)=>s+(c.qty||1),0);
+        return { bucket:b, count, byColor };
+      });
+      const maxCount = Math.max(1, ...curveData.map(d=>d.count));
+      const totalNonLand = curveData.reduce((s,d)=>s+d.count,0);
+      const avgCmc = totalNonLand>0 ? (nonLands.reduce((s,c)=>s+computeCmc(c.manaCost)*(c.qty||1),0)/totalNonLand).toFixed(2) : "0.00";
+
+      const typeCount = {};
+      cards.forEach(c => { const k=getGroupKey(c,"type"); typeCount[k]=(typeCount[k]||0)+(c.qty||1); });
+      const typeEntries = Object.entries(typeCount).sort((a,b)=>b[1]-a[1]);
+      const maxType = Math.max(1, ...typeEntries.map(([,n])=>n));
+
+      const colorCount = {};
+      nonLands.forEach(c => { const k=getGroupKey(c,"color"); colorCount[k]=(colorCount[k]||0)+(c.qty||1); });
+      const colorSegments = colorKeys.filter(k=>colorCount[k]>0).map(k=>({ color:CARD_COLOR_HEX[k], value:colorCount[k], label:k }));
+
+      return (
+        <div className="fade-in">
+          <div style={S.pt}>Curva di mana</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12,fontSize:11}}>
+            {colorKeys.filter(k=>curveData.some(d=>d.byColor[k]>0)).map(k=>(
+              <span key={k} style={{display:"flex",alignItems:"center",gap:4}}>
+                <span style={{width:9,height:9,borderRadius:"50%",background:CARD_COLOR_HEX[k],display:"inline-block"}}></span>{k}
+              </span>
+            ))}
+          </div>
+          <div style={{display:"flex",alignItems:"flex-end",gap:6,height:130,marginBottom:6}}>
+            {curveData.map(d => (
+              <div key={d.bucket} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-end",height:"100%"}}>
+                <div style={{fontSize:10,color:"#94a3b8",marginBottom:2}}>{d.count||""}</div>
+                <div style={{width:"100%",height:Math.max(2,(d.count/maxCount)*100)+"%",display:"flex",flexDirection:"column-reverse",borderRadius:"3px 3px 0 0",overflow:"hidden"}}>
+                  {colorKeys.filter(k=>d.byColor[k]>0).map(k=>(
+                    <div key={k} style={{height:(d.byColor[k]/d.count*100)+"%",background:CARD_COLOR_HEX[k]}}></div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",justifyContent:"space-around",fontSize:10,color:"#64748b",marginBottom:16}}>
+            {buckets.map(b=><span key={b}>{b}</span>)}
+          </div>
+          <div style={{display:"flex",gap:16,fontSize:12,marginBottom:20}}>
+            <span>Media: <b style={{color:"#f8fafc"}}>{avgCmc}</b></span>
+            <span>Non-terre: <b style={{color:"#f8fafc"}}>{totalNonLand}</b></span>
+          </div>
+
+          <div style={S.pt}>Per tipo</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:20}}>
+            {typeEntries.map(([t,n])=>(
+              <div key={t} style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:11,width:80,flexShrink:0,color:"#cbd5e1"}}>{t}</span>
+                <div style={{flex:1,background:"#0e0c16",borderRadius:4,height:14,overflow:"hidden"}}>
+                  <div style={{width:(n/maxType*100)+"%",height:"100%",background:"#f59e0b"}}></div>
+                </div>
+                <span style={{fontSize:11,width:22,textAlign:"right",color:"#94a3b8"}}>{n}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={S.pt}>Per colore</div>
+          <div style={{display:"flex",alignItems:"center",gap:20}}>
+            <div style={{width:120,height:120,borderRadius:"50%",background:buildConicGradient(colorSegments),flexShrink:0}}></div>
+            <div style={{display:"flex",flexDirection:"column",gap:5}}>
+              {colorSegments.map(s=>(
+                <span key={s.label} style={{fontSize:12,display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{width:10,height:10,borderRadius:"50%",background:s.color,display:"inline-block"}}></span>
+                  {s.label} {s.value}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function App() {
       const [data, setData] = useState({ profiles: [], decks: [], games: [] });
       const [loading, setLoading] = useState(true);
@@ -817,6 +910,7 @@
       const [pickerOpen, setPickerOpen] = useState(false); // tendina "aggiungi dalla collezione"
       const [deckGroupBy, setDeckGroupBy] = useState("none");
       const [showGroupPicker, setShowGroupPicker] = useState(false);
+      const [showDeckStats, setShowDeckStats] = useState(false);
       const [sideboardOpen, setSideboardOpen] = useState(false);
       const [pendingAction, setPendingAction] = useState(null); // modifica in attesa di conferma su mazzo importato
       const [forkName, setForkName] = useState("");
@@ -1685,6 +1779,17 @@
               </div>
             </div>
           )}
+          {showDeckStats && currentDeck && (
+            <div style={S.modalOverlay} onClick={()=>setShowDeckStats(false)}>
+              <div style={{...S.modalBox,maxHeight:"85vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>📊 Statistiche — {currentDeck.name}</span>
+                  <button style={S.btnGhost} onClick={()=>setShowDeckStats(false)}>✕</button>
+                </div>
+                <DeckStatsPanel cards={deckCardsLive} />
+              </div>
+            </div>
+          )}
           {showGroupPicker && (
             <div style={S.modalOverlay} onClick={()=>setShowGroupPicker(false)}>
               <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -1973,7 +2078,8 @@
                         ))}
                       </div>
                     )}
-                    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
+                      <button style={S.filterBtn} onClick={()=>setShowDeckStats(true)}>📊 Statistiche mazzo</button>
                       <div style={S.viewToggle}>
                         <button style={{...S.viewBtn,...(deckViewMode==="list"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("list")}>☰ Lista</button>
                         <button style={{...S.viewBtn,...(deckViewMode==="grid"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("grid")}>▦ Anteprima</button>
