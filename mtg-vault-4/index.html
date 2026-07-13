@@ -752,6 +752,8 @@
       const [showWinnerPicker, setShowWinnerPicker] = useState(false);
       const [tableMode, setTableMode] = useState(false);
       const [bgPickerFor, setBgPickerFor] = useState(null);
+      const [fullArtOptions, setFullArtOptions] = useState([]);
+      const [loadingFullArt, setLoadingFullArt] = useState(false);
       const [matchSettingsOpen, setMatchSettingsOpen] = useState(false);
       const [autoKO, setAutoKO] = useState(true);
       const [turnTimerEnabled, setTurnTimerEnabled] = useState(false);
@@ -766,6 +768,9 @@
         const id = setInterval(()=>setTurnSeconds(s=>s+1), 1000);
         return () => clearInterval(id);
       }, [timerRunning]);
+      useEffect(() => {
+        if (bgPickerFor && fullArtOptions.length===0 && !loadingFullArt) fetchFullArtBackgrounds();
+      }, [bgPickerFor]);
       const [csvText, setCsvText] = useState("");
       const [csvImporting, setCsvImporting] = useState(false);
       const [csvResult, setCsvResult] = useState("");
@@ -1014,6 +1019,17 @@
         setLivePlayers(players);
         setMatchView("live");
         setUndoStack([]); setTurnSeconds(0); setTimerRunning(false); setTurnPlayerIdx(0); setDiceResult(null);
+      }
+      async function fetchFullArtBackgrounds() {
+        setLoadingFullArt(true);
+        try {
+          const r = await fetch("https://api.scryfall.com/cards/search?q=is%3Afullart+type%3Aland&unique=art&order=random");
+          if (r.ok) {
+            const d = await r.json();
+            setFullArtOptions((d.data||[]).slice(0,30).map(c => ({ id:c.id, name:c.printed_name||c.name, image:cardImage(c) })).filter(c=>c.image));
+          }
+        } catch {}
+        setLoadingFullArt(false);
       }
       function updatePlayerBg(playerId, image) {
         setLivePlayers(ps => ps.map(p => p.id===playerId ? { ...p, bgImage: image } : p));
@@ -2129,7 +2145,7 @@
                     )}
                     <div style={{display:"flex",flexDirection:"column",gap:12}}>
                       {livePlayers.map(p => (
-                        <div key={p.id} style={{...S.panel,position:"relative",overflow:"hidden",
+                        <div key={p.id} style={{...S.panel,position:"relative",overflow:"hidden",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,
                           ...(isPlayerKO(p)?{opacity:.5}:{}),
                           ...(p.bgImage?{backgroundImage:`linear-gradient(rgba(10,10,15,.55),rgba(10,10,15,.8)), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}:{})}}>
                           {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
@@ -2318,8 +2334,6 @@
 
                 {bgPickerFor && (() => {
                   const player = livePlayers?.find(p=>p.id===bgPickerFor);
-                  const deck = data.decks.find(d=>d.id===player?.deckId);
-                  const sourceCards = (deck?.cards?.length ? deck.cards : (data.profiles.find(pr=>pr.id===player?.profileId)?.cards || [])).filter(c=>c.image);
                   return (
                     <div style={S.modalOverlay} onClick={()=>setBgPickerFor(null)}>
                       <div style={{...S.modalBox,maxHeight:"80vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -2327,14 +2341,19 @@
                           <span style={{fontWeight:700}}>🖼️ Sfondo per {player?.name}</span>
                           <button style={S.btnGhost} onClick={()=>setBgPickerFor(null)}>✕</button>
                         </div>
-                        {player?.bgImage && (
-                          <button style={{...S.btnGhost,width:"100%",marginBottom:12}} onClick={()=>updatePlayerBg(bgPickerFor,null)}>Rimuovi sfondo</button>
-                        )}
-                        {sourceCards.length===0 && (
-                          <div style={{...S.empty,padding:20}}>Nessuna immagine disponibile — collega un mazzo o un profilo con carte a questo giocatore.</div>
+                        <div style={{display:"flex",gap:8,marginBottom:12}}>
+                          {player?.bgImage && (
+                            <button style={{...S.btnGhost,flex:1}} onClick={()=>updatePlayerBg(bgPickerFor,null)}>Rimuovi sfondo</button>
+                          )}
+                          <button style={{...S.btnGhost,flex:1}} onClick={fetchFullArtBackgrounds} disabled={loadingFullArt}>
+                            {loadingFullArt?"⏳ Carico…":"🔀 Altre full-art"}
+                          </button>
+                        </div>
+                        {fullArtOptions.length===0 && !loadingFullArt && (
+                          <div style={{...S.empty,padding:20}}>Tocca "Altre full-art" per caricare la galleria.</div>
                         )}
                         <div style={S.miniGrid}>
-                          {sourceCards.map(c=>(
+                          {fullArtOptions.map(c=>(
                             <div key={c.id} style={S.miniTile} onClick={()=>updatePlayerBg(bgPickerFor,c.image)}>
                               <img src={c.image} alt={c.name} style={S.miniImg}/>
                             </div>
@@ -2511,7 +2530,7 @@
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
       tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
       tableGrid:{flex:1,display:"grid",gap:2},
-      tableCell:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#12101a",border:"1px solid #1e1b2e",padding:10,overflow:"hidden",position:"relative"},
+      tableCell:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#12101a",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,margin:3,padding:10,overflow:"hidden",position:"relative"},
       tableBgBtn:{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:"50%",background:"rgba(10,10,15,.7)",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:12,cursor:"pointer"},
       koBadge:{position:"absolute",top:8,left:"50%",transform:"translateX(-50%)",background:"#7f1d1d",color:"#fca5a5",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:12,zIndex:2},
       tableExitBtn:{padding:12,background:"#1e1b2e",color:"#94a3b8",border:"none",borderTop:"1px solid #2d2b3e",fontSize:12,fontWeight:600},
