@@ -309,9 +309,13 @@
         const commander = cards.find(c=>c.isCommander);
         if (!commander) warnings.push("Nessun comandante designato per questo mazzo.");
         else {
-          const identity = new Set(commander.colors||[]);
-          const offColor = nonBasic.filter(c => c.id!==commander.id && (c.colors||[]).some(col => !identity.has(col)));
-          if (offColor.length) warnings.push(`Fuori identità cromatica del comandante: ${offColor.map(c=>c.printed_name||c.name).join(", ")}.`);
+          const identity = new Set(commander.colorIdentity || commander.colors || []);
+          // Se non conosciamo l'identità del comandante (dati mancanti), non facciamo il controllo
+          // invece di segnalare per errore ogni carta colorata come "fuori identità"
+          if (identity.size > 0) {
+            const offColor = nonBasic.filter(c => c.id!==commander.id && (c.colorIdentity || c.colors || []).some(col => !identity.has(col)));
+            if (offColor.length) warnings.push(`Fuori identità cromatica del comandante: ${offColor.map(c=>c.printed_name||c.name).join(", ")}.`);
+          }
         }
       } else if (["Standard","Pioneer","Modern","Legacy"].includes(fmt)) {
         const over4 = nonBasic.filter(c => (c.qty||1) > 4);
@@ -744,6 +748,7 @@
       const [livePlayers, setLivePlayers] = useState(null); // array attiva durante la partita
       const [expandedCmd, setExpandedCmd] = useState(null); // id giocatore con pannello danno comandante aperto
       const [showWinnerPicker, setShowWinnerPicker] = useState(false);
+      const [tableMode, setTableMode] = useState(false);
       const [csvText, setCsvText] = useState("");
       const [csvImporting, setCsvImporting] = useState(false);
       const [csvResult, setCsvResult] = useState("");
@@ -782,6 +787,7 @@
 
       // Trova il prezzo migliore di una carta
       const [priceCard, setPriceCard] = useState(null);
+      const [deckCardPopup, setDeckCardPopup] = useState(null);
       const [priceInfo, setPriceInfo] = useState(null);
       const [priceLoading, setPriceLoading] = useState(false);
       const [priceError, setPriceError] = useState("");
@@ -810,7 +816,7 @@
         const newCard = {
           id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null,
           set:card.set_name, setCode:card.set, collectorNumber:card.collector_number,
-          rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[],
+          rarity:card.rarity, manaCost:card.mana_cost||"", colors:card.colors||[], colorIdentity:card.color_identity||[],
           type:card.type_line||"", legalities:card.legalities||{}, prices:card.prices||{},
           image:cardImage(card), condition, qty, foil:!!foil, addedAt:new Date().toISOString()
         };
@@ -928,6 +934,23 @@
           return;
         }
         guardedDeckAction(deck, { type:"addCard", card });
+      }
+      async function addDeckCardToCollection(card) {
+        const qty = Math.max(1, (card.qty||1) - (card.ownedQty||0));
+        const newCard = {
+          id: crypto.randomUUID(), scryfallId: card.scryfallId, name: card.name, printed_name: card.printed_name||null,
+          set: card.set, setCode: card.setCode, collectorNumber: card.collectorNumber,
+          rarity: card.rarity, manaCost: card.manaCost||"", colors: card.colors||[], colorIdentity: card.colorIdentity||[],
+          type: card.type||"", legalities: card.legalities||{}, prices: card.prices||{},
+          image: card.image, condition: "NM", qty, foil: false, addedAt: new Date().toISOString()
+        };
+        await saveCard(newCard, activeProfileId);
+        const u = { ...data, profiles: data.profiles.map(p =>
+          p.id===activeProfileId ? { ...p, cards: [...(p.cards||[]), newCard] } : p
+        )};
+        persist(u);
+        setDeckCardPopup(null);
+        alert(`${qty}× "${card.printed_name||card.name}" aggiunta alla collezione (condizione NM, modificabile in Collezione).`);
       }
       async function removeFromDeck(deckId, cardId) {
         const deck = data.decks.find(d => d.id===deckId); if (!deck) return;
@@ -1182,7 +1205,7 @@
           const newCard = {
             id: crypto.randomUUID(), scryfallId:sc.id, name:sc.name, printed_name:sc.printed_name||null,
             set:sc.set_name, setCode:sc.set, collectorNumber:sc.collector_number,
-            rarity:sc.rarity, manaCost:sc.mana_cost||"", colors:sc.colors||[],
+            rarity:sc.rarity, manaCost:sc.mana_cost||"", colors:sc.colors||[], colorIdentity:sc.color_identity||[],
             type:sc.type_line||"", legalities:sc.legalities||{}, prices:sc.prices||{},
             image:cardImage(sc), condition:row.condition, qty:row.qty, foil:row.foil, addedAt:new Date().toISOString()
           };
@@ -1287,7 +1310,7 @@
               set: sc?.set_name || "", setCode: sc?.set || "",
               collectorNumber: sc?.collector_number || "",
               rarity: sc?.rarity || "",
-              manaCost: sc?.mana_cost || "", colors: sc?.colors || [],
+              manaCost: sc?.mana_cost || "", colors: sc?.colors || [], colorIdentity: sc?.color_identity || [],
               type: sc?.type_line || "", legalities: sc?.legalities || {}, prices: sc?.prices || {},
               image: sc ? cardImage(sc) : null,
               qty: e.quantity,
@@ -1449,6 +1472,33 @@
                   <button style={{...S.btnP,width:"100%",padding:12}} onClick={()=>forkDeckAndApply(forkName)}>📋 Crea una copia e applica qui</button>
                   <button style={{...S.btnGhost,width:"100%",padding:12}} onClick={applyToOriginalDeck}>✏️ Modifica l'originale</button>
                   <button style={{...S.btnGhost,width:"100%",padding:12}} onClick={()=>{setPendingAction(null);setForkName("");}}>Annulla</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {deckCardPopup && (
+            <div style={S.modalOverlay} onClick={()=>setDeckCardPopup(null)}>
+              <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>{deckCardPopup.printed_name || deckCardPopup.name}</span>
+                  <button style={S.btnGhost} onClick={()=>setDeckCardPopup(null)}>✕</button>
+                </div>
+                <div style={{display:"flex",gap:14,marginBottom:16}}>
+                  {deckCardPopup.image && <img src={deckCardPopup.image} alt={deckCardPopup.name} style={{width:100,borderRadius:8}} />}
+                  <div>
+                    <div style={{fontSize:12,color:"#94a3b8",marginBottom:2}}>{deckCardPopup.type}</div>
+                    <div style={{fontSize:12,color:"#94a3b8",marginBottom:6}}>{deckCardPopup.set}</div>
+                    {deckCardPopup.owned!==undefined && (
+                      <div style={{fontSize:12,color:deckCardPopup.owned?"#34d399":"#f87171"}}>
+                        {deckCardPopup.owned?"✅ Posseduta":`❌ Possiedi ${deckCardPopup.ownedQty||0} su ${deckCardPopup.qty||1}`}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <button style={{...S.btnP,padding:12}} onClick={()=>addDeckCardToCollection(deckCardPopup)}>➕ Aggiungi alla collezione</button>
+                  <button style={{...S.btnPrice,marginTop:0}} onClick={()=>{findBestPrice(deckCardPopup);setDeckCardPopup(null);}}>🛒 Compra online</button>
+                  <button style={{...S.btnDel,marginTop:0,width:"100%"}} onClick={()=>{removeFromDeck(currentDeck.id,deckCardPopup.id);setDeckCardPopup(null);}}>🗑 Elimina dal mazzo</button>
                 </div>
               </div>
             </div>
@@ -1807,28 +1857,25 @@
                               </span>
                             )}
                             {card.isCommander && <span title="Comandante" style={{fontSize:13}}>👑</span>}
-                            <span style={{flex:1,fontSize:12,fontWeight:card.isCommander?700:400}}>{card.printed_name || card.name}</span>
+                            <span style={{flex:1,fontSize:12,fontWeight:card.isCommander?700:400,cursor:"pointer"}} onClick={()=>setDeckCardPopup(card)}>{card.printed_name || card.name}</span>
                             <span style={{fontSize:10,color:"#64748b",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.type?.split("—")[0]}</span>
-                            {card.owned===false && (
-                              <button style={S.btnMini} title="Trova il prezzo migliore" onClick={()=>findBestPrice(card)}>🛒</button>
-                            )}
                             {currentDeck.format==="Commander" && canBeCommander(card) && (
                               <button style={{...S.btnMini,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} title={card.isCommander?"Togli il ruolo di comandante":"Designa come comandante"} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑</button>
                             )}
-                            <button style={S.btnMini} title="Elimina dal mazzo" onClick={()=>removeFromDeck(currentDeck.id,card.id)}>🗑</button>
                           </div>
                         ))}
                         {deckViewMode==="grid" && (
                           <div style={S.miniGrid}>
                             {deckCardsLive.filter(c => !moxOnlyMissing || c.owned===false).map(card=>(
                               <div key={card.id} style={{...S.miniTile,...(card.isCommander?{border:"2px solid #f59e0b"}:{})}}>
-                                {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
+                                <div onClick={()=>setDeckCardPopup(card)} style={{cursor:"pointer"}}>
+                                  {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
+                                </div>
                                 {card.isCommander && <span style={{...S.miniQty,left:"auto",right:4,background:"#f59e0b",color:"#0a0a0f"}}>👑</span>}
                                 <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":` ❌ (${card.ownedQty||0}/${card.qty||1})`) : ""}</span>
                                 {currentDeck.format==="Commander" && canBeCommander(card) && (
                                   <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>{card.isCommander?"👑 Comandante ✕":"👑 Rendi comandante"}</button>
                                 )}
-                                <button style={S.miniBtn} onClick={()=>removeFromDeck(currentDeck.id,card.id)}>🗑 Elimina dal mazzo</button>
                               </div>
                             ))}
                           </div>
@@ -1939,7 +1986,10 @@
 
                 {matchView==="live" && livePlayers && (
                   <>
-                    <button style={{...S.btnP,width:"100%",padding:13}} onClick={()=>setShowWinnerPicker(true)}>🏁 Termina partita</button>
+                    <div style={{display:"flex",gap:10}}>
+                      <button style={{...S.btnP,flex:1,padding:13}} onClick={()=>setShowWinnerPicker(true)}>🏁 Termina partita</button>
+                      <button style={{...S.btnGhost,padding:13}} onClick={()=>setTableMode(true)}>🔄 Tavolo</button>
+                    </div>
                     <div style={{display:"flex",flexDirection:"column",gap:12}}>
                       {livePlayers.map(p => (
                         <div key={p.id} style={S.panel}>
@@ -2051,6 +2101,40 @@
                     </div>
                   </div>
                 )}
+
+                {tableMode && livePlayers && (() => {
+                  const n = livePlayers.length;
+                  const cols = n>2 ? 2 : 1;
+                  const rows = Math.ceil(n/cols);
+                  return (
+                    <div style={S.tableModeWrap}>
+                      <div style={{...S.tableGrid, gridTemplateColumns:`repeat(${cols},1fr)`, gridTemplateRows:`repeat(${rows},1fr)`}}>
+                        {livePlayers.map((p,i) => {
+                          const rotated = i < n/2;
+                          return (
+                            <div key={p.id} style={{...S.tableCell, transform: rotated?"rotate(180deg)":"none"}}>
+                              <div style={{fontWeight:700,fontSize:14,marginBottom:2}}>{p.name}</div>
+                              {p.deckName && <div style={{fontSize:10,color:"#94a3b8",marginBottom:6}}>{p.deckName}</div>}
+                              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                                <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−</button>
+                                <div style={{fontSize:36,fontWeight:800,minWidth:60,textAlign:"center",color:p.life<=10?"#f87171":"#f8fafc"}}>{p.life}</div>
+                                <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+</button>
+                              </div>
+                              {trackPoison && (
+                                <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11}}>
+                                  <span style={{color:"#34d399"}}>☠️ {p.poison}</span>
+                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
+                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <button style={S.tableExitBtn} onClick={()=>setTableMode(false)}>✕ Esci dalla modalità tavolo</button>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -2213,6 +2297,10 @@
       filterBtn:{position:"relative",padding:"6px 12px",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#e2e8f0",borderRadius:7,cursor:"pointer",fontSize:12,fontWeight:600},
       filterBadge:{marginLeft:5,color:"#f59e0b",fontSize:10},
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
+      tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
+      tableGrid:{flex:1,display:"grid",gap:2},
+      tableCell:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#12101a",border:"1px solid #1e1b2e",padding:10,overflow:"hidden"},
+      tableExitBtn:{padding:12,background:"#1e1b2e",color:"#94a3b8",border:"none",borderTop:"1px solid #2d2b3e",fontSize:12,fontWeight:600},
       btnPrice:{display:"block",width:"100%",marginTop:6,padding:"7px",background:"#3a2e1e",color:"#f59e0b",border:"1px solid #92600e",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
       priceLink:{display:"block",padding:"10px 12px",background:"#0e0c16",borderRadius:8,color:"#e2e8f0",fontSize:13,fontWeight:600,textDecoration:"none",border:"1px solid #2d2b3e"},
       btnDel:{marginTop:6,padding:"6px 14px",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,cursor:"pointer",fontSize:12},
