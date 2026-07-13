@@ -859,7 +859,7 @@
       useEffect(() => {
         loadData().then(d => { setData(d); setLoading(false); });
       }, []);
-      const [tab, setTab] = useState("collection");
+      const [tab, setTab] = useState("home");
       const [showScan, setShowScan] = useState(false);
       const [confirmCard, setConfirmCard] = useState(null);
       const [filterText, setFilterText] = useState("");
@@ -1861,19 +1861,19 @@
 
           <header style={S.header}>
             <div style={S.hTop}>
-              <div style={S.logo}>
+              <div style={S.logo} onClick={()=>setTab("home")} title="Torna alla Home">
                 <span style={S.logoIcon}>✦</span>
                 <div>
                   <div style={S.logoTitle}>MyMagic</div>
                   <div style={S.logoSub}>{activeProfile?.avatar} {activeProfile?.name}</div>
                 </div>
               </div>
-              <button style={S.btnGhost} onClick={() => { setActiveProfileId(null); setTab("collection"); }}>
+              <button style={S.btnGhost} onClick={() => { setActiveProfileId(null); setTab("home"); }}>
                 ← Profili
               </button>
             </div>
             <nav style={S.nav}>
-              {[["collection","🃏 Collezione"],["decks","⚔️ Mazzi"],["match","🎮 Partita"],["advisor","🤖 AI Advisor"]].map(([k,l]) => (
+              {[["home","🏠 Home"],["collection","🃏 Collezione"],["decks","⚔️ Mazzi"],["match","🎮 Partita"],["advisor","🤖 AI Advisor"]].map(([k,l]) => (
                 <button key={k} onClick={() => setTab(k)} style={{...S.navBtn,...(tab===k?S.navActive:{})}}>
                   {l}
                 </button>
@@ -1884,6 +1884,38 @@
           <main style={S.main}>
 
             {/* ── COLLEZIONE ── */}
+            {tab==="home" && (
+              <div style={S.col} className="fade-in">
+                <div style={{textAlign:"center",padding:"24px 0 8px"}}>
+                  <div style={{fontSize:52,marginBottom:8}}>{activeProfile?.avatar}</div>
+                  <div style={{fontSize:24,fontWeight:800}}>{activeProfile?.name}</div>
+                  <div style={{fontSize:12,color:"#64748b",marginTop:4}}>Cosa vuoi fare oggi?</div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                  <button style={S.homeTile} onClick={()=>setTab("collection")}>
+                    <div style={{fontSize:32}}>🃏</div>
+                    <div style={{fontWeight:700,marginTop:8,fontSize:15}}>Collezione</div>
+                    <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{collection.length} titoli · €{totalValue.toFixed(0)}</div>
+                  </button>
+                  <button style={S.homeTile} onClick={()=>setTab("decks")}>
+                    <div style={{fontSize:32}}>⚔️</div>
+                    <div style={{fontWeight:700,marginTop:8,fontSize:15}}>Mazzi</div>
+                    <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{myDecks.length} mazzi</div>
+                  </button>
+                  <button style={S.homeTile} onClick={()=>setTab("match")}>
+                    <div style={{fontSize:32}}>🎮</div>
+                    <div style={{fontWeight:700,marginTop:8,fontSize:15}}>Partita</div>
+                    <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{(data.games||[]).filter(g=>g.ownerId===activeProfileId).length} partite giocate</div>
+                  </button>
+                  <button style={S.homeTile} onClick={()=>setTab("advisor")}>
+                    <div style={{fontSize:32}}>🤖</div>
+                    <div style={{fontWeight:700,marginTop:8,fontSize:15}}>AI Advisor</div>
+                    <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>Consigli e analisi</div>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {tab==="collection" && (
               <div style={S.col} className="fade-in">
                 <div style={S.statsRow}>
@@ -2706,11 +2738,11 @@
       // Header
       header:{background:"linear-gradient(180deg,#12101a,#0e0c16)",borderBottom:"1px solid #1e1b2e",position:"sticky",top:0,zIndex:100},
       hTop:{maxWidth:1100,margin:"0 auto",padding:"12px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"},
-      logo:{display:"flex",alignItems:"center",gap:10},
+      logo:{display:"flex",alignItems:"center",gap:10,cursor:"pointer"},
       logoIcon:{fontSize:24,color:"#f59e0b"},
       logoTitle:{fontSize:18,fontWeight:800,letterSpacing:"-0.5px"},
       logoSub:{fontSize:11,color:"#94a3b8"},
-      nav:{maxWidth:1100,margin:"0 auto",padding:"0 20px",display:"flex",gap:2},
+      nav:{maxWidth:1100,margin:"0 auto",padding:"0 20px",display:"flex",gap:2,overflowX:"auto"},
       navBtn:{padding:"10px 16px",background:"transparent",border:"none",color:"#64748b",cursor:"pointer",fontSize:13,borderBottom:"2px solid transparent"},
       navActive:{color:"#f8fafc",borderBottom:"2px solid #f59e0b"},
       // Main
@@ -2735,6 +2767,7 @@
       foilToggle:{display:"block",width:"100%",padding:"10px",background:"#0e0c16",color:"#94a3b8",border:"1px solid #2d2b3e",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:600},
       foilToggleOn:{background:"linear-gradient(135deg,#a78bfa,#34d399,#f59e0b)",color:"#0a0a0f",border:"1px solid transparent"},
       statsToggle:{padding:"9px",background:"transparent",border:"1px dashed #2d2b3e",color:"#94a3b8",borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:600},
+      homeTile:{background:"#12101a",border:"1px solid #1e1b2e",borderRadius:16,padding:"26px 12px",textAlign:"center",cursor:"pointer",color:"#f8fafc"},
       filterBtn:{position:"relative",padding:"6px 12px",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#e2e8f0",borderRadius:7,cursor:"pointer",fontSize:12,fontWeight:600},
       filterBadge:{marginLeft:5,color:"#f59e0b",fontSize:10},
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
