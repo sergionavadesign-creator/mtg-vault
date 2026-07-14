@@ -28,6 +28,18 @@
     const { useState, useRef, useCallback, useEffect, useMemo } = React;
 
     const FORMATS = ["Standard","Pioneer","Modern","Legacy","Vintage","Commander","Pauper"];
+    const EXTRA_COUNTER_TYPES = [
+      { key:"exp", label:"Exp", icon:"📈" },
+      { key:"energy", label:"Energia", icon:"⚡" },
+      { key:"ko", label:"K.O.", icon:"💀" },
+      { key:"daynight", label:"Giorno/notte", icon:"☀️" },
+      { key:"ctax", label:"Tassa comandante", icon:"👑" },
+      { key:"ascend", label:"Ascendenza", icon:"🚀" },
+      { key:"rad", label:"Radiazioni", icon:"☢️" },
+      { key:"initiative", label:"Iniziativa", icon:"🗡️" },
+      { key:"monarch", label:"Monarca", icon:"👑" },
+      { key:"treasure", label:"Tesoro", icon:"💰" },
+    ];
     // Parole chiave per riconoscere set "Universes Beyond"/crossover, così il toggle
     // "nascondi crossover" nella ricerca può filtrarli (specie utile per le terre base,
     // ristampate in praticamente ogni set)
@@ -887,6 +899,14 @@
       const [fullArtOptions, setFullArtOptions] = useState([]);
       const [loadingFullArt, setLoadingFullArt] = useState(false);
       const [matchSettingsOpen, setMatchSettingsOpen] = useState(false);
+      const [showResetConfirm, setShowResetConfirm] = useState(false);
+      const [showPlayerCountPopup, setShowPlayerCountPopup] = useState(false);
+      const [showTimerPopup, setShowTimerPopup] = useState(false);
+      const [showColorPopup, setShowColorPopup] = useState(false);
+      const [showDicePopup, setShowDicePopup] = useState(false);
+      const [colorizePanels, setColorizePanels] = useState(false);
+      const [playerPopupFor, setPlayerPopupFor] = useState(null);
+      const [playerPopupTab, setPlayerPopupTab] = useState("giocatore");
       const [autoKO, setAutoKO] = useState(true);
       const [turnTimerEnabled, setTurnTimerEnabled] = useState(false);
       const [turnSeconds, setTurnSeconds] = useState(0);
@@ -1148,7 +1168,8 @@
           return {
             id: p.key, name: p.name.trim() || profile?.name || `Giocatore ${p.key}`,
             profileId: p.profileId||null, deckId: p.deckId||null, deckName: deck?.name||null,
-            life: matchStartLife, poison: 0, cmdDamage: {}, bgImage
+            life: matchStartLife, poison: 0, cmdDamage: {}, bgImage,
+            customColor: null, highContrast: false, enabledCounters: [], extraCounters: {}
           };
         });
         setLivePlayers(players);
@@ -1169,6 +1190,37 @@
       function updatePlayerBg(playerId, image) {
         setLivePlayers(ps => ps.map(p => p.id===playerId ? { ...p, bgImage: image } : p));
         setBgPickerFor(null);
+      }
+      function updatePlayerColor(playerId, color) {
+        setLivePlayers(ps => ps.map(p => p.id===playerId ? { ...p, customColor: color, bgImage: null } : p));
+      }
+      function toggleHighContrast(playerId) {
+        setLivePlayers(ps => ps.map(p => p.id===playerId ? { ...p, highContrast: !p.highContrast } : p));
+      }
+      function uploadPlayerBg(playerId, file) {
+        const reader = new FileReader();
+        reader.onload = ev => {
+          setLivePlayers(ps => ps.map(p => p.id===playerId ? { ...p, bgImage: ev.target.result, customColor: null } : p));
+        };
+        reader.readAsDataURL(file);
+      }
+      function toggleCounterType(playerId, key) {
+        setLivePlayers(ps => ps.map(p => {
+          if (p.id!==playerId) return p;
+          const enabled = p.enabledCounters||[];
+          const isOn = enabled.includes(key);
+          return {
+            ...p,
+            enabledCounters: isOn ? enabled.filter(k=>k!==key) : [...enabled, key],
+            extraCounters: { ...(p.extraCounters||{}), [key]: (p.extraCounters||{})[key] ?? 0 }
+          };
+        }));
+      }
+      function adjustExtraCounter(playerId, key, delta) {
+        pushUndo();
+        setLivePlayers(ps => ps.map(p => p.id===playerId
+          ? { ...p, extraCounters: { ...(p.extraCounters||{}), [key]: ((p.extraCounters||{})[key]||0) + delta } }
+          : p));
       }
       function pushUndo() {
         setUndoStack(st => [...st.slice(-19), livePlayers]);
@@ -1219,6 +1271,35 @@
       function formatTurnTime(s) {
         const m = Math.floor(s/60), sec = s%60;
         return `${m}:${sec.toString().padStart(2,"0")}`;
+      }
+      function resetMatch() {
+        pushUndo();
+        setLivePlayers(ps => ps.map(p => ({ ...p, life: matchStartLife, poison: 0, cmdDamage: {} })));
+        setTurnSeconds(0); setTimerRunning(false); setTurnPlayerIdx(0);
+        setShowResetConfirm(false);
+      }
+      function addPlayerMidGame() {
+        const newId = Date.now();
+        setLivePlayers(ps => [...ps, { id:newId, name:`Giocatore ${ps.length+1}`, profileId:null, deckId:null, deckName:null, life:matchStartLife, poison:0, cmdDamage:{}, bgImage:null, customColor:null, highContrast:false, enabledCounters:[], extraCounters:{} }]);
+      }
+      function removePlayerMidGame(id) {
+        setLivePlayers(ps => ps.filter(p=>p.id!==id).map(p => {
+          const cd = { ...p.cmdDamage }; delete cd[id];
+          return { ...p, cmdDamage: cd };
+        }));
+      }
+      function renamePlayerMidGame(id, name) {
+        setLivePlayers(ps => ps.map(p => p.id===id ? { ...p, name } : p));
+      }
+      // Colore pastello associato all'identità cromatica del comandante/mazzo, per la modalità "colora sfondo"
+      function colorIdentityBg(player) {
+        const deck = data.decks.find(d=>d.id===player.deckId);
+        const commander = deck?.cards?.find(c=>c.isCommander);
+        const identity = commander?.colorIdentity?.length ? commander.colorIdentity : (commander?.colors||[]);
+        const pastelMap = { W:"#e8e2c8", U:"#a9c9e8", B:"#8f86a3", R:"#e0a3a3", G:"#a3d9b1" };
+        if (identity.length===1) return pastelMap[identity[0]] || "#3a3550";
+        if (identity.length>1) return "#d9c98a";
+        return "#3a3550";
       }
       async function finalizeMatch(winnerId) {
         const winner = livePlayers.find(p=>p.id===winnerId);
@@ -2387,23 +2468,22 @@
                       {livePlayers.map(p => (
                         <div key={p.id} style={{...S.panel,position:"relative",overflow:"hidden",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,
                           ...(isPlayerKO(p)?{opacity:.5}:{}),
-                          ...(p.bgImage?{backgroundImage:`linear-gradient(rgba(10,10,15,.55),rgba(10,10,15,.8)), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}:{})}}>
+                          ...(p.bgImage
+                            ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.75:.55}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}
+                            : (p.customColor ? {background:p.customColor} : {}))}}>
                           {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
                           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
-                            <div>
-                              <div style={{fontWeight:700,fontSize:15}}>{p.name}</div>
+                            <div style={{cursor:"pointer"}} onClick={()=>{setPlayerPopupFor(p.id);setPlayerPopupTab("giocatore");}}>
+                              <div style={{fontWeight:700,fontSize:15,textDecoration:"underline",textDecorationStyle:"dotted",textDecorationColor:"#64748b"}}>{p.name}</div>
                               {p.deckName && <div style={{fontSize:11,color:"#94a3b8"}}>{p.deckName}</div>}
                             </div>
-                            <div style={{display:"flex",alignItems:"center",gap:8}}>
-                              {trackPoison && (
-                                <div style={{display:"flex",alignItems:"center",gap:6}}>
-                                  <span style={{fontSize:11,color:"#34d399"}}>☠️ {p.poison}</span>
-                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
-                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
-                                </div>
-                              )}
-                              <button style={S.btnMini} title="Cambia sfondo" onClick={()=>setBgPickerFor(p.id)}>🖼️</button>
-                            </div>
+                            {trackPoison && (
+                              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                <span style={{fontSize:11,color:"#34d399"}}>☠️ {p.poison}</span>
+                                <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
+                                <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
+                              </div>
+                            )}
                           </div>
                           <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:8}}>
                             <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-5)}>−5</button>
@@ -2412,6 +2492,21 @@
                             <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+1</button>
                             <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,5)}>+5</button>
                           </div>
+                          {p.enabledCounters?.length>0 && (
+                            <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>
+                              {p.enabledCounters.map(key => {
+                                const ct = EXTRA_COUNTER_TYPES.find(c=>c.key===key);
+                                if (!ct) return null;
+                                return (
+                                  <div key={key} style={{display:"flex",alignItems:"center",gap:4,background:"rgba(10,10,15,.5)",borderRadius:6,padding:"3px 6px"}}>
+                                    <span style={{fontSize:11}}>{ct.icon} {p.extraCounters?.[key]||0}</span>
+                                    <button style={S.btnMini} onClick={()=>adjustExtraCounter(p.id,key,-1)}>−</button>
+                                    <button style={S.btnMini} onClick={()=>adjustExtraCounter(p.id,key,1)}>+</button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
                           {trackCmdDamage && livePlayers.length>1 && (
                             <div>
                               <button style={S.statsToggle} onClick={()=>setExpandedCmd(expandedCmd===p.id?null:p.id)}>
@@ -2503,41 +2598,157 @@
 
                 {tableMode && livePlayers && (() => {
                   const n = livePlayers.length;
-                  const cols = n>2 ? 2 : 1;
-                  const rows = Math.ceil(n/cols);
+                  const half = Math.ceil(n/2);
+                  const topPlayers = livePlayers.slice(0, half);
+                  const bottomPlayers = livePlayers.slice(half);
+                  const renderCell = (p, rotated) => (
+                    <div key={p.id} style={{...S.tableCell, transform: rotated?"rotate(180deg)":"none",
+                      ...(isPlayerKO(p)?{opacity:.45}:{}),
+                      ...(colorizePanels ? { background: colorIdentityBg(p) } :
+                        p.bgImage ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.7:.5}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"} :
+                        p.customColor ? {background:p.customColor} : {})}}>
+                      {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
+                      <div style={{fontWeight:700,fontSize:14,marginBottom:2,color:colorizePanels?"#0a0a0f":"#f8fafc",cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted"}}
+                        onClick={()=>{setPlayerPopupFor(p.id);setPlayerPopupTab("giocatore");}}>{p.name}</div>
+                      {p.deckName && <div style={{fontSize:10,marginBottom:6,color:colorizePanels?"#2a2a2a":"#94a3b8"}}>{p.deckName}</div>}
+                      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                        <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−</button>
+                        <div style={{fontSize:36,fontWeight:800,minWidth:60,textAlign:"center",color:colorizePanels?"#0a0a0f":(p.life<=10?"#f87171":"#f8fafc")}}>{p.life}</div>
+                        <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+</button>
+                      </div>
+                      {trackPoison && (
+                        <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11}}>
+                          <span style={{color:"#166534"}}>☠️ {p.poison}</span>
+                          <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
+                          <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
+                        </div>
+                      )}
+                    </div>
+                  );
                   return (
                     <div style={S.tableModeWrap}>
-                      <div style={{...S.tableGrid, gridTemplateColumns:`repeat(${cols},1fr)`, gridTemplateRows:`repeat(${rows},1fr)`}}>
-                        {livePlayers.map((p,i) => {
-                          const rotated = i < n/2;
-                          return (
-                            <div key={p.id} style={{...S.tableCell, transform: rotated?"rotate(180deg)":"none",
-                              ...(isPlayerKO(p)?{opacity:.45}:{}),
-                              ...(p.bgImage?{backgroundImage:`linear-gradient(rgba(10,10,15,.5),rgba(10,10,15,.8)), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}:{})}}>
-                              {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
-                              <button style={S.tableBgBtn} onClick={()=>setBgPickerFor(p.id)}>🖼️</button>
-                              <div style={{fontWeight:700,fontSize:14,marginBottom:2}}>{p.name}</div>
-                              {p.deckName && <div style={{fontSize:10,color:"#94a3b8",marginBottom:6}}>{p.deckName}</div>}
-                              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-                                <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−</button>
-                                <div style={{fontSize:36,fontWeight:800,minWidth:60,textAlign:"center",color:p.life<=10?"#f87171":"#f8fafc"}}>{p.life}</div>
-                                <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+</button>
-                              </div>
-                              {trackPoison && (
-                                <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11}}>
-                                  <span style={{color:"#34d399"}}>☠️ {p.poison}</span>
-                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
-                                  <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
+                      <button style={S.tableCloseBtn} onClick={()=>setTableMode(false)}>✕</button>
+                      <div style={{...S.tableHalf, gridTemplateColumns:`repeat(${Math.min(topPlayers.length,2)},1fr)`}}>
+                        {topPlayers.map(p=>renderCell(p,true))}
                       </div>
-                      <button style={S.tableExitBtn} onClick={()=>setTableMode(false)}>✕ Esci dalla modalità tavolo</button>
+                      <div style={S.tableToolbar}>
+                        <button style={S.tableIconBtn} title="Reimposta partita" onClick={()=>setShowResetConfirm(true)}>🔄</button>
+                        <button style={S.tableIconBtn} title="Giocatori" onClick={()=>setShowPlayerCountPopup(true)}>{n}</button>
+                        <button style={S.tableIconBtn} title="Timer" onClick={()=>setShowTimerPopup(true)}>🕐</button>
+                        <button style={S.tableIconBtn} title="Colori mana" onClick={()=>setShowColorPopup(true)}>🎨</button>
+                        <button style={S.tableIconBtn} title="Dadi" onClick={()=>setShowDicePopup(true)}>🎲</button>
+                      </div>
+                      <div style={{...S.tableHalf, gridTemplateColumns:`repeat(${Math.min(bottomPlayers.length,2)},1fr)`}}>
+                        {bottomPlayers.map(p=>renderCell(p,false))}
+                      </div>
                     </div>
                   );
                 })()}
+
+                {showResetConfirm && (
+                  <div style={S.modalOverlay} onClick={()=>setShowResetConfirm(false)}>
+                    <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                      <div style={S.modalHeader}>
+                        <span style={{fontWeight:700}}>🔄 Reimposta partita</span>
+                        <button style={S.btnGhost} onClick={()=>setShowResetConfirm(false)}>✕</button>
+                      </div>
+                      <div style={{fontSize:13,color:"#cbd5e1",marginBottom:16}}>
+                        Riporta tutti i giocatori a {matchStartLife} vita, azzera veleno e danno comandante. La partita resta in corso (non viene salvata nello storico).
+                      </div>
+                      <div style={{display:"flex",gap:10}}>
+                        <button style={{...S.btnP,flex:1}} onClick={resetMatch}>Reimposta</button>
+                        <button style={{...S.btnGhost,flex:1}} onClick={()=>setShowResetConfirm(false)}>Annulla</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {showPlayerCountPopup && (
+                  <div style={S.modalOverlay} onClick={()=>setShowPlayerCountPopup(false)}>
+                    <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                      <div style={S.modalHeader}>
+                        <span style={{fontWeight:700}}>👥 Giocatori</span>
+                        <button style={S.btnGhost} onClick={()=>setShowPlayerCountPopup(false)}>✕</button>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
+                        {livePlayers?.map(p=>(
+                          <div key={p.id} style={{display:"flex",gap:8,alignItems:"center"}}>
+                            <input style={{...S.inp,flex:1}} value={p.name} onChange={e=>renamePlayerMidGame(p.id,e.target.value)} />
+                            {livePlayers.length>2 && (
+                              <button style={S.btnMini} onClick={()=>removePlayerMidGame(p.id)}>🗑</button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {livePlayers?.length<6 && (
+                        <button style={{...S.btnGhost,width:"100%"}} onClick={addPlayerMidGame}>+ Aggiungi giocatore</button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {showTimerPopup && (
+                  <div style={S.modalOverlay} onClick={()=>setShowTimerPopup(false)}>
+                    <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                      <div style={S.modalHeader}>
+                        <span style={{fontWeight:700}}>🕐 Timer del turno</span>
+                        <button style={S.btnGhost} onClick={()=>setShowTimerPopup(false)}>✕</button>
+                      </div>
+                      <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+                        <input type="checkbox" checked={turnTimerEnabled} onChange={e=>setTurnTimerEnabled(e.target.checked)} />
+                        Mostra timer del turno
+                      </label>
+                      {turnTimerEnabled && (
+                        <>
+                          <div style={{textAlign:"center",fontSize:32,fontWeight:800,marginBottom:6}}>{formatTurnTime(turnSeconds)}</div>
+                          <div style={{textAlign:"center",fontSize:12,color:"#94a3b8",marginBottom:16}}>Turno di {livePlayers?.[turnPlayerIdx]?.name}</div>
+                          <div style={{display:"flex",gap:10}}>
+                            <button style={{...S.btnP,flex:1}} onClick={()=>setTimerRunning(r=>!r)}>{timerRunning?"⏸ Pausa":"▶️ Avvia"}</button>
+                            <button style={{...S.btnGhost,flex:1}} onClick={nextTurn}>⏭ Prossimo</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {showColorPopup && (
+                  <div style={S.modalOverlay} onClick={()=>setShowColorPopup(false)}>
+                    <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                      <div style={S.modalHeader}>
+                        <span style={{fontWeight:700}}>🎨 Colori mana</span>
+                        <button style={S.btnGhost} onClick={()=>setShowColorPopup(false)}>✕</button>
+                      </div>
+                      <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                        <input type="checkbox" checked={colorizePanels} onChange={e=>setColorizePanels(e.target.checked)} />
+                        Colora i pannelli in base all'identità del comandante
+                      </label>
+                      <div style={{fontSize:11,color:"#64748b"}}>
+                        Se attivo, sostituisce lo sfondo full-art con un colore pastello legato al colore del mazzo di ciascun giocatore.
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {showDicePopup && (
+                  <div style={S.modalOverlay} onClick={()=>{setShowDicePopup(false);setDiceResult(null);}}>
+                    <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                      <div style={S.modalHeader}>
+                        <span style={{fontWeight:700}}>🎲 Dadi e moneta</span>
+                        <button style={S.btnGhost} onClick={()=>{setShowDicePopup(false);setDiceResult(null);}}>✕</button>
+                      </div>
+                      <div style={{display:"flex",gap:8,marginBottom:12}}>
+                        <button style={{...S.btnGhost,flex:1}} onClick={()=>rollDice(6)}>🎲 D6</button>
+                        <button style={{...S.btnGhost,flex:1}} onClick={()=>rollDice(20)}>🎲 D20</button>
+                        <button style={{...S.btnGhost,flex:1}} onClick={rollCoin}>🪙 Moneta</button>
+                      </div>
+                      {diceResult && (
+                        <div style={{textAlign:"center",fontSize:22,fontWeight:800,padding:"14px 0",color:"#f59e0b"}}>{diceResult}</div>
+                      )}
+                      <button style={{...S.btnGhost,width:"100%",marginTop:8}} onClick={pickRandomStarter}>🎯 Scegli a caso chi inizia</button>
+                    </div>
+                  </div>
+                )}
 
                 {matchSettingsOpen && (
                   <div style={S.modalOverlay} onClick={()=>{setMatchSettingsOpen(false);setDiceResult(null);}}>
@@ -2571,6 +2782,75 @@
                     </div>
                   </div>
                 )}
+
+                {playerPopupFor && (() => {
+                  const player = livePlayers?.find(p=>p.id===playerPopupFor);
+                  if (!player) return null;
+                  return (
+                    <div style={S.modalOverlay} onClick={()=>setPlayerPopupFor(null)}>
+                      <div style={{...S.modalBox,maxHeight:"85vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                        <div style={S.modalHeader}>
+                          <span style={{fontWeight:700}}>{player.name}</span>
+                          <button style={S.btnGhost} onClick={()=>setPlayerPopupFor(null)}>✕</button>
+                        </div>
+                        <div style={{display:"flex",gap:8,background:"#0e0c16",borderRadius:8,padding:4,marginBottom:16}}>
+                          {[["giocatore","Giocatore"],["contatori","Contatori"]].map(([k,l])=>(
+                            <button key={k} onClick={()=>setPlayerPopupTab(k)}
+                              style={{flex:1,padding:"8px 0",borderRadius:6,border:"none",cursor:"pointer",fontWeight:600,fontSize:13,
+                                background:playerPopupTab===k?"#f59e0b":"transparent",color:playerPopupTab===k?"#0a0a0f":"#94a3b8"}}>
+                              {l}
+                            </button>
+                          ))}
+                        </div>
+
+                        {playerPopupTab==="giocatore" && (
+                          <div className="fade-in">
+                            <label style={S.lbl}>Colore</label>
+                            <input type="color" value={player.customColor||"#3a3550"} onChange={e=>updatePlayerColor(player.id,e.target.value)}
+                              style={{width:"100%",height:48,border:"1px solid #2d2b3e",borderRadius:8,background:"none",marginBottom:12,cursor:"pointer"}} />
+                            <label style={{fontSize:12,color:"#94a3b8",display:"flex",alignItems:"center",gap:8,marginBottom:20}}>
+                              <input type="checkbox" checked={!!player.highContrast} onChange={()=>toggleHighContrast(player.id)} />
+                              🔆 Aumenta contrasto
+                            </label>
+
+                            <label style={S.lbl}>Sfondo</label>
+                            {player.bgImage && <img src={player.bgImage} alt="sfondo attuale" style={{width:"100%",maxHeight:140,objectFit:"cover",borderRadius:8,marginBottom:10}} />}
+                            <div style={{display:"flex",gap:8,marginBottom:8}}>
+                              <label style={{...S.btnGhost,flex:1,textAlign:"center",cursor:"pointer"}}>
+                                📤 Carica immagine
+                                <input type="file" accept="image/*" style={{display:"none"}}
+                                  onChange={e=>{ const f=e.target.files?.[0]; if (f) uploadPlayerBg(player.id,f); }} />
+                              </label>
+                              <button style={{...S.btnGhost,flex:1}} onClick={()=>setBgPickerFor(player.id)}>🖼️ Galleria full-art</button>
+                            </div>
+                            {(player.bgImage || player.customColor) && (
+                              <button style={{...S.btnGhost,width:"100%"}} onClick={()=>{updatePlayerBg(player.id,null);updatePlayerColor(player.id,null);}}>Rimuovi sfondo/colore</button>
+                            )}
+                          </div>
+                        )}
+
+                        {playerPopupTab==="contatori" && (
+                          <div className="fade-in">
+                            <div style={{fontSize:11,color:"#64748b",marginBottom:12}}>Tocca per attivare un contatore per questo giocatore.</div>
+                            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                              {EXTRA_COUNTER_TYPES.map(ct=>{
+                                const on = (player.enabledCounters||[]).includes(ct.key);
+                                return (
+                                  <button key={ct.key} onClick={()=>toggleCounterType(player.id,ct.key)}
+                                    style={{padding:"12px 4px",borderRadius:8,border:`1px solid ${on?"#f59e0b":"#2d2b3e"}`,
+                                      background:on?"#1e1b2e":"transparent",color:on?"#f59e0b":"#94a3b8",cursor:"pointer",fontSize:11,fontWeight:on?700:400}}>
+                                    <div style={{fontSize:20,marginBottom:4}}>{ct.icon}</div>
+                                    {ct.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {bgPickerFor && (() => {
                   const player = livePlayers?.find(p=>p.id===bgPickerFor);
@@ -2772,11 +3052,13 @@
       filterBadge:{marginLeft:5,color:"#f59e0b",fontSize:10},
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
       tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
-      tableGrid:{flex:1,display:"grid",gap:2},
+      tableHalf:{flex:1,display:"grid",gap:2,minHeight:0},
       tableCell:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#12101a",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,margin:3,padding:10,overflow:"hidden",position:"relative"},
       tableBgBtn:{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:"50%",background:"rgba(10,10,15,.7)",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:12,cursor:"pointer"},
       koBadge:{position:"absolute",top:8,left:"50%",transform:"translateX(-50%)",background:"#7f1d1d",color:"#fca5a5",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:12,zIndex:2},
-      tableExitBtn:{padding:12,background:"#1e1b2e",color:"#94a3b8",border:"none",borderTop:"1px solid #2d2b3e",fontSize:12,fontWeight:600},
+      tableToolbar:{display:"flex",alignItems:"center",justifyContent:"center",gap:18,padding:"10px 0",background:"#0a0a0f",flexShrink:0},
+      tableIconBtn:{width:46,height:46,borderRadius:"50%",background:"transparent",border:"none",color:"#f8fafc",fontSize:19,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"},
+      tableCloseBtn:{position:"absolute",top:8,right:8,zIndex:10,width:32,height:32,borderRadius:"50%",background:"rgba(10,10,15,.7)",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:14,cursor:"pointer"},
       btnPrice:{display:"block",width:"100%",marginTop:6,padding:"7px",background:"#3a2e1e",color:"#f59e0b",border:"1px solid #92600e",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:600},
       priceLink:{display:"block",padding:"10px 12px",background:"#0e0c16",borderRadius:8,color:"#e2e8f0",fontSize:13,fontWeight:600,textDecoration:"none",border:"1px solid #2d2b3e"},
       btnDel:{marginTop:6,padding:"6px 14px",background:"#7f1d1d",color:"#fca5a5",border:"none",borderRadius:6,cursor:"pointer",fontSize:12},
