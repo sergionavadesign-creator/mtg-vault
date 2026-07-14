@@ -84,7 +84,7 @@
             }))
           })),
           decks: (decks||[]).map(d => ({
-            ...d, ownerId: d.profile_id, isImported: !!d.is_imported,
+            ...d, ownerId: d.profile_id, isImported: !!d.is_imported, folder: d.folder||"",
             cards: d.cards || []
           })),
           games: (games||[]).map(g => ({
@@ -141,15 +141,15 @@
     async function saveDeck(deck) {
       const payload = {
         id: deck.id, profile_id: deck.ownerId, name: deck.name,
-        format: deck.format, cards: deck.cards, is_imported: !!deck.isImported
+        format: deck.format, cards: deck.cards, is_imported: !!deck.isImported, folder: deck.folder||null
       };
       try {
         const { error } = await sb.from("decks").upsert(payload);
         if (error) throw error;
       } catch(e) {
-        console.warn("saveDeck: colonna is_imported forse mancante, ritento senza", e);
+        console.warn("saveDeck: colonna is_imported o folder forse mancante, ritento senza", e);
         try {
-          const { is_imported, ...fallback } = payload;
+          const { is_imported, folder, ...fallback } = payload;
           await sb.from("decks").upsert(fallback);
         } catch(e2) { console.error("saveDeck error", e2); }
       }
@@ -279,6 +279,7 @@
       return p > 0 ? "€"+p.toFixed(2) : "N/D";
     }
     const cardImage = c => c?.image_uris?.normal || c?.card_faces?.[0]?.image_uris?.normal || null;
+    const cardArtCrop = c => c?.image_uris?.art_crop || c?.card_faces?.[0]?.image_uris?.art_crop || null;
     const cardLegality = (c, f) => {
       const l = c?.legalities?.[f.toLowerCase()];
       return l==="legal"?"✅":l==="banned"?"🚫":l==="restricted"?"⚠️":"❌";
@@ -923,6 +924,9 @@
       useEffect(() => {
         if (bgPickerFor && fullArtOptions.length===0 && !loadingFullArt) fetchFullArtBackgrounds();
       }, [bgPickerFor]);
+      useEffect(() => {
+        try { localStorage.setItem("mtg_vault_empty_folders", JSON.stringify(emptyFolders)); } catch {}
+      }, [emptyFolders]);
       const [csvText, setCsvText] = useState("");
       const [csvImporting, setCsvImporting] = useState(false);
       const [csvResult, setCsvResult] = useState("");
@@ -935,6 +939,13 @@
       const [pendingAction, setPendingAction] = useState(null); // modifica in attesa di conferma su mazzo importato
       const [forkName, setForkName] = useState("");
       const [deckName, setDeckName] = useState("");
+      const [activeFolder, setActiveFolder] = useState(null); // null = vista principale (cartelle + mazzi senza cartella)
+      const [showNewFolderPopup, setShowNewFolderPopup] = useState(false);
+      const [newFolderName, setNewFolderName] = useState("");
+      const [emptyFolders, setEmptyFolders] = useState(() => {
+        try { return JSON.parse(localStorage.getItem("mtg_vault_empty_folders")||"[]"); } catch { return []; }
+      });
+      const [moveFolderFor, setMoveFolderFor] = useState(null); // id del mazzo che si sta spostando
       const [deckFormat, setDeckFormat] = useState("Commander");
       const [activeDeck, setActiveDeck] = useState(null);
       const [deckView, setDeckView] = useState("list");
@@ -998,7 +1009,7 @@
           set:card.set_name, setCode:card.set, collectorNumber:card.collector_number,
           rarity:card.rarity, manaCost:card.mana_cost||card.card_faces?.[0]?.mana_cost||"", colors:(card.colors?.length?card.colors:card.card_faces?.[0]?.colors)||[], colorIdentity:card.color_identity||[], oracleText:card.oracle_text||card.card_faces?.[0]?.oracle_text||"",
           type:card.type_line||"", legalities:card.legalities||{}, prices:card.prices||{},
-          image:cardImage(card), condition, qty, foil:!!foil, addedAt:new Date().toISOString()
+          image:cardImage(card), artCrop:cardArtCrop(card), condition, qty, foil:!!foil, addedAt:new Date().toISOString()
         };
         await saveCard(newCard, activeProfileId);
         const u = { ...data, profiles: data.profiles.map(p =>
@@ -1040,7 +1051,7 @@
       // Deck management
       async function createDeck() {
         if (!deckName.trim()) return;
-        const deck = { id:crypto.randomUUID(), name:deckName, format:deckFormat, cards:[], ownerId:activeProfileId };
+        const deck = { id:crypto.randomUUID(), name:deckName, format:deckFormat, cards:[], ownerId:activeProfileId, folder: activeFolder||"" };
         await saveDeck(deck);
         persist({ ...data, decks: [...data.decks, deck] });
         setDeckName(""); setActiveDeck(deck.id); setDeckView("build");
@@ -1147,6 +1158,31 @@
         if (activeDeck===deckId) { setActiveDeck(null); setDeckView("list"); }
       }
 
+      // ── CARTELLE MAZZI ──
+      function createFolder(name) {
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        setEmptyFolders(f => f.includes(trimmed) ? f : [...f, trimmed]);
+        setShowNewFolderPopup(false); setNewFolderName("");
+        setActiveFolder(trimmed);
+      }
+      async function moveDeckToFolder(deckId, folderName) {
+        const u = { ...data };
+        const deck = u.decks.find(d => d.id===deckId); if (!deck) return;
+        deck.folder = folderName || "";
+        await saveDeck(deck);
+        persist(u);
+        setMoveFolderFor(null);
+      }
+      function deleteFolder(folderName) {
+        if (!confirm(`Eliminare la cartella "${folderName}"? I mazzi al suo interno non verranno cancellati, torneranno semplicemente senza cartella.`)) return;
+        const u = { ...data };
+        u.decks.filter(d=>d.folder===folderName).forEach(d => { d.folder = ""; saveDeck(d); });
+        persist(u);
+        setEmptyFolders(f => f.filter(n=>n!==folderName));
+        if (activeFolder===folderName) setActiveFolder(null);
+      }
+
       // ── SEGNAPUNTI PARTITA ──
       function addMatchPlayer() {
         if (matchSetupPlayers.length >= 6) return;
@@ -1164,7 +1200,7 @@
           const profile = data.profiles.find(pr => pr.id===p.profileId);
           const deck = data.decks.find(d => d.id===p.deckId);
           const commanderCard = deck?.cards?.find(c=>c.isCommander);
-          const bgImage = (matchFormat==="Commander" && commanderCard?.image) ? commanderCard.image : null;
+          const bgImage = (matchFormat==="Commander" && (commanderCard?.artCrop||commanderCard?.image)) ? (commanderCard.artCrop||commanderCard.image) : null;
           return {
             id: p.key, name: p.name.trim() || profile?.name || `Giocatore ${p.key}`,
             profileId: p.profileId||null, deckId: p.deckId||null, deckName: deck?.name||null,
@@ -1182,7 +1218,7 @@
           const r = await fetch("https://api.scryfall.com/cards/search?q=is%3Afullart+type%3Aland&unique=art&order=random");
           if (r.ok) {
             const d = await r.json();
-            setFullArtOptions((d.data||[]).slice(0,30).map(c => ({ id:c.id, name:c.printed_name||c.name, image:cardImage(c) })).filter(c=>c.image));
+            setFullArtOptions((d.data||[]).slice(0,30).map(c => ({ id:c.id, name:c.printed_name||c.name, image:cardArtCrop(c)||cardImage(c) })).filter(c=>c.image));
           }
         } catch {}
         setLoadingFullArt(false);
@@ -1545,7 +1581,7 @@
             set:sc.set_name, setCode:sc.set, collectorNumber:sc.collector_number,
             rarity:sc.rarity, manaCost:sc.mana_cost||sc.card_faces?.[0]?.mana_cost||"", colors:(sc.colors?.length?sc.colors:sc.card_faces?.[0]?.colors)||[], colorIdentity:sc.color_identity||[], oracleText:sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
             type:sc.type_line||"", legalities:sc.legalities||{}, prices:sc.prices||{},
-            image:cardImage(sc), condition:row.condition, qty:row.qty, foil:row.foil, addedAt:new Date().toISOString()
+            image:cardImage(sc), artCrop:cardArtCrop(sc), condition:row.condition, qty:row.qty, foil:row.foil, addedAt:new Date().toISOString()
           };
           await saveCard(newCard, activeProfileId);
           newCards.push(newCard);
@@ -1651,6 +1687,7 @@
               manaCost: sc?.mana_cost || sc?.card_faces?.[0]?.mana_cost || "", colors: (sc?.colors?.length?sc.colors:sc?.card_faces?.[0]?.colors) || [], colorIdentity: sc?.color_identity || [], oracleText: sc?.oracle_text || sc?.card_faces?.[0]?.oracle_text || "",
               type: sc?.type_line || "", legalities: sc?.legalities || {}, prices: sc?.prices || {},
               image: sc ? cardImage(sc) : null,
+              artCrop: sc ? cardArtCrop(sc) : null,
               qty: e.quantity,
               owned: ownedQty >= e.quantity,
               ownedQty,
@@ -1768,6 +1805,41 @@
               </div>
             </div>
           )}
+          {showNewFolderPopup && (
+            <div style={S.modalOverlay} onClick={()=>setShowNewFolderPopup(false)}>
+              <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>📁 Nuova cartella</span>
+                  <button style={S.btnGhost} onClick={()=>setShowNewFolderPopup(false)}>✕</button>
+                </div>
+                <input style={{...S.inp,width:"100%",marginBottom:14}} placeholder="Nome cartella…" value={newFolderName}
+                  onChange={e=>setNewFolderName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&createFolder(newFolderName)} autoFocus />
+                <button style={{...S.btnP,width:"100%",padding:12}} onClick={()=>createFolder(newFolderName)} disabled={!newFolderName.trim()}>Crea cartella</button>
+              </div>
+            </div>
+          )}
+          {moveFolderFor && (() => {
+            const deck = data.decks.find(d=>d.id===moveFolderFor);
+            const folderNames = [...new Set([...emptyFolders, ...myDecks.map(d=>d.folder).filter(Boolean)])].sort();
+            return (
+              <div style={S.modalOverlay} onClick={()=>setMoveFolderFor(null)}>
+                <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                  <div style={S.modalHeader}>
+                    <span style={{fontWeight:700}}>📁 Sposta "{deck?.name}"</span>
+                    <button style={S.btnGhost} onClick={()=>setMoveFolderFor(null)}>✕</button>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
+                    <button style={{...S.btnGhost,...(!deck?.folder?{border:"1px solid #f59e0b",color:"#f59e0b"}:{})}} onClick={()=>moveDeckToFolder(moveFolderFor,"")}>Nessuna cartella</button>
+                    {folderNames.map(fname=>(
+                      <button key={fname} style={{...S.btnGhost,...(deck?.folder===fname?{border:"1px solid #f59e0b",color:"#f59e0b"}:{})}} onClick={()=>moveDeckToFolder(moveFolderFor,fname)}>📁 {fname}</button>
+                    ))}
+                  </div>
+                  <input style={{...S.inp,width:"100%",marginBottom:8}} placeholder="…oppure crea una nuova cartella" value={newFolderName}
+                    onChange={e=>setNewFolderName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newFolderName.trim()){moveDeckToFolder(moveFolderFor,newFolderName.trim());setEmptyFolders(f=>[...f,newFolderName.trim()]);setNewFolderName("");}}} />
+                </div>
+              </div>
+            );
+          })()}
           {showCsvImport && (
             <div style={S.modalOverlay} onClick={()=>{if(!csvImporting){setShowCsvImport(false);setCsvText("");setCsvResult("");}}}>
               <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -2101,10 +2173,13 @@
             {/* ── MAZZI ── */}
             {tab==="decks" && (
               <div style={S.col} className="fade-in">
-                {deckView==="list" && (
+                {deckView==="list" && (() => {
+                  const folderNames = [...new Set([...emptyFolders, ...myDecks.map(d=>d.folder).filter(Boolean)])].sort();
+                  const visibleDecks = activeFolder===null ? myDecks.filter(d=>!d.folder) : myDecks.filter(d=>d.folder===activeFolder);
+                  return (
                   <>
                     <div style={S.panel}>
-                      <div style={S.pt}>Crea nuovo mazzo</div>
+                      <div style={S.pt}>Crea nuovo mazzo{activeFolder?` — in "${activeFolder}"`:""}</div>
                       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                         <input style={{...S.inp,flex:1}} placeholder="Nome mazzo…" value={deckName}
                           onChange={e=>setDeckName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&createDeck()} />
@@ -2151,9 +2226,36 @@
                       )}
                     </div>
 
-                    {myDecks.length===0 && <div style={S.empty}><div style={{fontSize:36,marginBottom:10}}>⚔️</div>Nessun mazzo ancora.</div>}
+                    <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                      {activeFolder!==null && (
+                        <button style={S.btnGhost} onClick={()=>setActiveFolder(null)}>← Cartelle</button>
+                      )}
+                      <span style={{fontSize:16,fontWeight:700}}>{activeFolder!==null ? `📁 ${activeFolder}` : "I tuoi mazzi"}</span>
+                      {activeFolder!==null && (
+                        <button style={{...S.btnGhost,marginLeft:"auto"}} onClick={()=>deleteFolder(activeFolder)}>🗑 Elimina cartella</button>
+                      )}
+                      {activeFolder===null && (
+                        <button style={{...S.btnGhost,marginLeft:"auto"}} onClick={()=>setShowNewFolderPopup(true)}>📁 Nuova cartella</button>
+                      )}
+                    </div>
+
+                    {activeFolder===null && folderNames.length>0 && (
+                      <div style={S.deckGrid}>
+                        {folderNames.map(fname => {
+                          const cnt = myDecks.filter(d=>d.folder===fname).length;
+                          return (
+                            <div key={fname} style={{...S.deckCard,cursor:"pointer"}} onClick={()=>setActiveFolder(fname)}>
+                              <div style={{fontSize:15,fontWeight:700}}>📁 {fname}</div>
+                              <div style={{fontSize:11,color:"#64748b",marginTop:4}}>{cnt} mazzi</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {visibleDecks.length===0 && folderNames.length===0 && <div style={S.empty}><div style={{fontSize:36,marginBottom:10}}>⚔️</div>Nessun mazzo ancora.</div>}
                     <div style={S.deckGrid}>
-                      {myDecks.map(deck => {
+                      {visibleDecks.map(deck => {
                         const col = FORMAT_COLORS[deck.format]||"#94a3b8";
                         const cnt = deck.cards.reduce((s,c)=>s+(c.qty||1),0);
                         return (
@@ -2165,6 +2267,7 @@
                                 <div style={{fontSize:11,color:"#64748b",marginTop:4}}>{cnt} carte · {deck.cards.length} titoli</div>
                               </div>
                               <div style={{display:"flex",gap:6}}>
+                                <button style={S.btnSm} onClick={()=>setMoveFolderFor(deck.id)}>📁</button>
                                 <button style={S.btnSm} onClick={()=>{setActiveDeck(deck.id);setDeckView("build");}}>✏️</button>
                                 <button style={{...S.btnSm,background:"#7f1d1d"}} onClick={()=>handleDeleteDeck(deck.id)}>🗑</button>
                               </div>
@@ -2174,7 +2277,8 @@
                       })}
                     </div>
                   </>
-                )}
+                  );
+                })()}
                 {deckView==="build" && currentDeck && (
                   <div>
                     <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10,flexWrap:"wrap"}}>
@@ -2601,8 +2705,16 @@
                   const half = Math.ceil(n/2);
                   const topPlayers = livePlayers.slice(0, half);
                   const bottomPlayers = livePlayers.slice(half);
-                  const renderCell = (p, rotated) => (
-                    <div key={p.id} style={{...S.tableCell, transform: rotated?"rotate(180deg)":"none",
+                  const topCols = Math.min(topPlayers.length,2);
+                  const bottomCols = Math.min(bottomPlayers.length,2);
+                  const cellRotation = (idx, cols, isTop) => {
+                    if (cols<=1) return isTop ? 180 : 0; // un solo giocatore per riga: schema classico alto/basso
+                    return (idx % cols)===0 ? 90 : -90; // due affiancati: parte alta verso il centro orizzontale
+                  };
+                  const renderCell = (p, idx, cols, isTop) => {
+                    const deg = cellRotation(idx, cols, isTop);
+                    return (
+                    <div key={p.id} style={{...S.tableCell, transform: `rotate(${deg}deg)`,
                       ...(isPlayerKO(p)?{opacity:.45}:{}),
                       ...(colorizePanels ? { background: colorIdentityBg(p) } :
                         p.bgImage ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.7:.5}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"} :
@@ -2624,12 +2736,12 @@
                         </div>
                       )}
                     </div>
-                  );
+                  );};
                   return (
                     <div style={S.tableModeWrap}>
                       <button style={S.tableCloseBtn} onClick={()=>setTableMode(false)}>✕</button>
-                      <div style={{...S.tableHalf, gridTemplateColumns:`repeat(${Math.min(topPlayers.length,2)},1fr)`}}>
-                        {topPlayers.map(p=>renderCell(p,true))}
+                      <div style={{...S.tableHalf, gridTemplateColumns:`repeat(${topCols},1fr)`}}>
+                        {topPlayers.map((p,idx)=>renderCell(p,idx,topCols,true))}
                       </div>
                       <div style={S.tableToolbar}>
                         <button style={S.tableIconBtn} title="Reimposta partita" onClick={()=>setShowResetConfirm(true)}>🔄</button>
@@ -2638,8 +2750,8 @@
                         <button style={S.tableIconBtn} title="Colori mana" onClick={()=>setShowColorPopup(true)}>🎨</button>
                         <button style={S.tableIconBtn} title="Dadi" onClick={()=>setShowDicePopup(true)}>🎲</button>
                       </div>
-                      <div style={{...S.tableHalf, gridTemplateColumns:`repeat(${Math.min(bottomPlayers.length,2)},1fr)`}}>
-                        {bottomPlayers.map(p=>renderCell(p,false))}
+                      <div style={{...S.tableHalf, gridTemplateColumns:`repeat(${bottomCols},1fr)`}}>
+                        {bottomPlayers.map((p,idx)=>renderCell(p,idx,bottomCols,false))}
                       </div>
                     </div>
                   );
