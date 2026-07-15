@@ -352,7 +352,8 @@
 
     function validateDeckRules(deck, cards) {
       const warnings = [];
-      if (!deck || !cards.length) return warnings;
+      const notes = [];
+      if (!deck || !cards.length) return { warnings, notes };
       const fmt = deck.format;
       const nonBasic = cards.filter(c => !BASIC_LAND_NAMES.has(canonicalCardName(c.name)));
       if (fmt === "Commander") {
@@ -371,11 +372,18 @@
             if (offColor.length) warnings.push(`Fuori identità cromatica del comandante: ${offColor.map(c=>c.printed_name||c.name).join(", ")}.`);
           }
         }
+        // Nota informativa sulle terre: soglia soft, non un errore — sotto le 30 terre è sempre
+        // un campanello d'allarme, tra 30-33 va bene solo per cEDH turbo con fast mana pesante
+        const landCount = cards.filter(c => (c.type||"").toLowerCase().includes("land")).reduce((s,c)=>s+(c.qty||1),0);
+        if (landCount > 0) {
+          if (landCount < 30) notes.push(`Solo ${landCount} terre: è un numero molto basso anche per cEDH turbo. Verifica di avere un pacchetto di fast mana pesante (Sol Ring, Mana Crypt, Mox/Lotus) e una curva di mana molto bassa, altrimenti rischi mana screw.`);
+          else if (landCount < 34) notes.push(`${landCount} terre: sotto lo standard casual (36-38). Ha senso solo se il mazzo ha curva bassa e molto ramp/fast mana; altrimenti valuta di salire.`);
+        }
       } else if (["Standard","Pioneer","Modern","Legacy"].includes(fmt)) {
         const over4 = nonBasic.filter(c => (c.qty||1) > 4);
         if (over4.length) warnings.push(`Limite 4 copie superato: ${over4.map(c=>`${c.printed_name||c.name} (${c.qty}×)`).join(", ")}.`);
       }
-      return warnings;
+      return { warnings, notes };
     }
 
     // ── PROFILE SCREEN ───────────────────────────────────────
@@ -956,6 +964,7 @@
       const [advising, setAdvising] = useState(false);
       const [advisorMode, setAdvisorMode] = useState("analyze"); // analyze | build
       const [deckStyle, setDeckStyle] = useState("aggressivo");
+      const [powerLevel, setPowerLevel] = useState("casual"); // casual | ottimizzato | cedh
       const [buildSource, setBuildSource] = useState("collection"); // "collection" | "all"
       const [deckStyleDesc, setDeckStyleDesc] = useState("");
       const [buildFormat, setBuildFormat] = useState("Commander");
@@ -1386,7 +1395,9 @@
         return [...withOwnership].sort((a,b) => (b.isCommander?1:0) - (a.isCommander?1:0));
       }, [deckCards, ownedNameMap]);
 
-      const deckWarnings = useMemo(() => validateDeckRules(currentDeck, deckCardsLive), [currentDeck, deckCardsLive]);
+      const deckValidation = useMemo(() => validateDeckRules(currentDeck, deckCardsLive), [currentDeck, deckCardsLive]);
+      const deckWarnings = deckValidation.warnings;
+      const deckNotes = deckValidation.notes;
 
       // AI Advisor
       // Chiama la Edge Function ai-proxy (Gemini). Contratto confermato dal codice sorgente:
@@ -1461,17 +1472,35 @@
           ? "CARTE DISPONIBILI IN COLLEZIONE:\n"+allCards+"\n\nCostruisci il miglior mazzo possibile usando SOLO le carte elencate sopra.\n\n"
           : "Costruisci il miglior mazzo possibile usando QUALSIASI carta esistente di Magic: The Gathering legale nel formato indicato — non sei limitato a una collezione specifica, scegli le carte oggettivamente migliori per l'obiettivo.\n\n";
         const excludedLabel = buildSource==="collection" ? "**Carte escluse dalla collezione**" : "**Carte più costose da acquistare**";
-        const prompt = "Sei un esperto costruttore di mazzi Magic: The Gathering.\n\n"+
-          "IMPORTANTE: rispondi in modo diretto e conciso. NON commentare la richiesta, NON fare premesse, NON esprimere opinioni. Vai dritto al contenuto richiesto, iniziando subito dalla sezione **Lista mazzo**.\n\n"+
+        const isCommander = buildFormat==="Commander";
+        const deckSize = isCommander ? 100 : 60;
+        const commanderSection = isCommander
+          ? "**Comandante**\n(scrivi SOLO il nome della creatura leggendaria scelta come comandante, una riga, nessun'altra informazione — questa carta va comunque ripetuta anche nella Lista mazzo qui sotto)\n\n"
+          : "";
+        const manaBaseGuidance = !isCommander ? "" :
+          "LINEE GUIDA BASE DI MANA (Commander, applica quella corrispondente al livello di potenza \""+powerLevel+"\"):\n"+
+          (powerLevel==="cedh"
+            ? "- Livello cEDH competitivo: 28-33 terre totali SOLO SE il mazzo rispetta rigorosamente questi tre requisiti insieme: (1) pacchetto fast mana quasi completo (Sol Ring, Mana Crypt, Mana Vault, Mox/Lotus Petal se disponibili), (2) costo di mana medio (CMC) delle carte non-terra inferiore a 2.0, (3) numerosi cantrip/tutor a costo 1 (Ponder, ricerche a basso costo) per compensare le poche terre. Se non riesci a garantire tutti e tre i requisiti con le carte disponibili, sali a 34-36 terre invece di rischiare mana screw.\n"
+            : powerLevel==="ottimizzato"
+            ? "- Livello ottimizzato: 34-37 terre come base, aggiustando in base alla curva (sali di 1-2 se il CMC medio supera 3, scendi di 1-2 se hai molto ramp economico a costo 1-2).\n"
+            : "- Livello casual: 36-38 terre come standard di sicurezza. Se il comandante costa 5+ mana o il mazzo ha una curva alta, sali a 39-41. Non scendere mai sotto le 35 in un mazzo casual, anche con del ramp: è la causa più comune di mano imbarazzata (mana screw).\n")+
+          "- Ogni 2-3 fonti di ramp/accelerazione di mana extra puoi togliere circa 1 terra dalla base, ma non oltre i minimi indicati sopra.\n"+
+          "- Mazzi mono-colore possono stare nella fascia bassa del range indicato (meno fixing di colore necessario); mazzi a 4-5 colori nella fascia alta.\n\n";
+        const prompt = "Sei un esperto costruttore di mazzi Magic: The Gathering, con competenze da giudice/teorico del formato.\n\n"+
+          "IMPORTANTE: rispondi in modo diretto e conciso. NON commentare la richiesta, NON fare premesse, NON esprimere opinioni. Vai dritto al contenuto richiesto.\n\n"+
+          "PRIORITÀ ASSOLUTA: la Lista mazzo deve contenere ESATTAMENTE "+deckSize+" carte (conteggio totale delle copie, non dei titoli) — questo è il requisito più importante di tutta la risposta. Se lo spazio nella risposta è limitato, accorcia o ometti Strategia/Carte chiave/"+excludedLabel.replace(/\*/g,"")+" ma NON troncare mai la Lista mazzo: deve restare completa e integrale fino all'ultima carta.\n\n"+
           sourceBlock+
+          manaBaseGuidance+
           "FORMATO: "+buildFormat+"\n"+
+          (isCommander ? "LIVELLO DI POTENZA: "+powerLevel+"\n" : "")+
           "STILE DI GIOCO RICHIESTO: "+deckStyle+styleDesc+"\n\n"+
-          "Rispondi in italiano, in modo sintetico, con ESATTAMENTE questa struttura:\n"+
-          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa, una riga per carta, in inglese così è ricercabile, senza descrizioni)\n\n"+
-          "**Strategia del mazzo**\n(massimo 3 righe: come funziona, win condition)\n\n"+
-          "**Carte chiave**\n(le 3-5 carte più importanti, una riga ciascuna)\n\n"+
-          excludedLabel+"\n(max 3 carte, con prezzo stimato)\n\n"+
-          "Rispetta le regole del formato "+buildFormat+" (numero carte, ban list, ecc.).";
+          "Rispondi in italiano, in modo sintetico, con ESATTAMENTE questa struttura e in questo ordine:\n\n"+
+          commanderSection+
+          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa, una riga per carta, in inglese così è ricercabile, senza descrizioni — deve sommare esattamente "+deckSize+" carte, rispettando la base di mana indicata sopra)\n\n"+
+          "**Strategia del mazzo**\n(massimo 2 righe: come funziona, win condition)\n\n"+
+          "**Carte chiave**\n(le 3 carte più importanti, una riga ciascuna)\n\n"+
+          excludedLabel+"\n(max 2 carte, con prezzo stimato)\n\n"+
+          "Rispetta rigorosamente le regole del formato "+buildFormat+" (numero carte, singleton se Commander, ban list, ecc.).";
 
         try {
           const text = await callAiProxy(prompt);
@@ -1504,6 +1533,17 @@
           alert("Non sono riuscito a leggere la lista carte dalla risposta dell'IA. Riprova a costruire il mazzo.");
           setSavingAiDeck(false); return;
         }
+
+        const totalQty = lines.reduce((s,l)=>s+l.qty,0);
+        const expectedSize = buildFormat==="Commander" ? 100 : 60;
+        if (Math.abs(totalQty - expectedSize) > 5) {
+          const tooMany = totalQty > expectedSize;
+          const proceed = confirm(`Attenzione: la lista generata ha ${totalQty} carte invece delle ${expectedSize} previste per ${buildFormat}${tooMany?" (l'IA non ha rispettato il limite)":" (probabilmente la risposta si è troncata)"}. Vuoi salvarlo comunque così com'è, oppure annulla e prova a rigenerarlo?`);
+          if (!proceed) { setSavingAiDeck(false); return; }
+        }
+
+        const commanderName = (extractAiSection(buildResult, "Comandante")||"").trim().replace(/^-\s*/,"");
+
         let cardsOut = [];
         let missed = [];
 
@@ -1512,7 +1552,7 @@
             const match = collection.find(c =>
               c.name.toLowerCase()===name.toLowerCase() || (c.printed_name||"").toLowerCase()===name.toLowerCase());
             if (!match) { missed.push(name); return; }
-            cardsOut.push({ ...match, id: crypto.randomUUID(), qty });
+            cardsOut.push({ ...match, id: crypto.randomUUID(), qty, isCommander: commanderName && match.name.toLowerCase()===commanderName.toLowerCase() });
           });
         } else {
           // Modalità "tutte le carte": recupera i dati completi da Scryfall e traccia cosa possiedi già
@@ -1550,7 +1590,8 @@
               oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
               type: sc.type_line||"", legalities: sc.legalities||{}, prices: sc.prices||{},
               image: cardImage(sc), artCrop: cardArtCrop(sc),
-              qty, owned: ownedQty >= qty, ownedQty, imported: true
+              qty, owned: ownedQty >= qty, ownedQty, imported: true,
+              isCommander: commanderName && sc.name.toLowerCase()===commanderName.toLowerCase()
             });
           });
         }
@@ -1558,6 +1599,12 @@
         if (cardsOut.length === 0) {
           alert("Non sono riuscito a trovare nessuna delle carte suggerite. Riprova a costruire il mazzo.");
           setSavingAiDeck(false); return;
+        }
+        // Fallback: se l'IA ha indicato un comandante ma non corrisponde a nessuna riga della lista,
+        // designa comunque come comandante la prima creatura leggendaria idonea trovata
+        if (buildFormat==="Commander" && !cardsOut.some(c=>c.isCommander)) {
+          const fallback = cardsOut.find(c=>canBeCommander(c));
+          if (fallback) fallback.isCommander = true;
         }
         const deck = { id: crypto.randomUUID(), name: saveDeckName.trim()||"Mazzo AI", format: buildFormat, cards: cardsOut, ownerId: activeProfileId, isImported: buildSource==="all", folder: activeFolder||"" };
         await saveDeck(deck);
@@ -2343,6 +2390,14 @@
                         <div style={{fontWeight:700,fontSize:12,marginBottom:6}}>⚠️ Controlli regolamento</div>
                         {deckWarnings.map((w,i)=>(
                           <div key={i} style={{fontSize:11,color:"#fca5a5",marginBottom:3}}>• {w}</div>
+                        ))}
+                      </div>
+                    )}
+                    {deckNotes.length>0 && (
+                      <div style={S.notePanel}>
+                        <div style={{fontWeight:700,fontSize:12,marginBottom:6}}>💡 Da tenere d'occhio</div>
+                        {deckNotes.map((n,i)=>(
+                          <div key={i} style={{fontSize:11,color:"#93c5fd",marginBottom:3}}>• {n}</div>
                         ))}
                       </div>
                     )}
@@ -3132,6 +3187,27 @@
                         {FORMATS.map(f=><option key={f}>{f}</option>)}
                       </select>
 
+                      {buildFormat==="Commander" && (
+                        <>
+                          <label style={S.lbl}>Livello di potenza</label>
+                          <div style={{display:"flex",gap:8,marginBottom:14}}>
+                            {[["casual","🎲 Casual"],["ottimizzato","⚙️ Ottimizzato"],["cedh","🏆 cEDH"]].map(([v,l])=>(
+                              <button key={v} onClick={()=>setPowerLevel(v)}
+                                style={{flex:1,padding:"9px 4px",borderRadius:7,border:`1px solid ${powerLevel===v?"#f59e0b":"#2d2b3e"}`,
+                                  background:powerLevel===v?"#1e1b2e":"transparent",color:powerLevel===v?"#f59e0b":"#94a3b8",
+                                  cursor:"pointer",fontSize:12,fontWeight:powerLevel===v?700:400}}>
+                                {l}
+                              </button>
+                            ))}
+                          </div>
+                          {powerLevel==="cedh" && (
+                            <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>
+                              cEDH punta a 28-33 terre solo se il mazzo ha fast mana pesante e curva bassissima — l'IA scenderà sotto le 34 solo se riesce davvero a garantirlo con le carte disponibili.
+                            </div>
+                          )}
+                        </>
+                      )}
+
                       <label style={S.lbl}>Stile di gioco</label>
                       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
                         {[["aggressivo","⚔️ Aggressivo"],["controllo","🛡️ Controllo"],["combo","💥 Combo"],["midrange","⚖️ Midrange"],["rampa","🌿 Rampa"],["personalizzato","✏️ Personalizzato"]].map(([v,l])=>(
@@ -3271,6 +3347,7 @@
       viewBtnOn:{background:"#f59e0b",color:"#0a0a0f"},
       pickerHeader:{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"},
       warnPanel:{background:"#2a1414",border:"1px solid #7f1d1d",borderRadius:10,padding:12,marginBottom:14},
+      notePanel:{background:"#132030",border:"1px solid #1d4ed8",borderRadius:10,padding:12,marginBottom:14},
       // Lista compatta
       listWrap:{display:"flex",flexDirection:"column",gap:6},
       listRow:{display:"flex",alignItems:"center",gap:10,padding:8,background:"#12101a",border:"1px solid #1e1b2e",borderRadius:9,cursor:"pointer"},
