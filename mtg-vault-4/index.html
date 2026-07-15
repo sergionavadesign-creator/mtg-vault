@@ -1403,7 +1403,7 @@
       // Chiama la Edge Function ai-proxy (Gemini). Contratto confermato dal codice sorgente:
       // richiesta { messages: [{ role:"user", content: prompt }] } (come l'API Anthropic),
       // risposta { content: [{ type:"text", text: "..." }] }.
-      async function callAiProxy(prompt) {
+      async function callAiProxy(prompt, retrying) {
         const res = await fetch(`${SUPABASE_URL}/functions/v1/ai-proxy`, {
           method:"POST",
           headers:{ "Content-Type":"application/json", apikey: SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}` },
@@ -1413,7 +1413,16 @@
         const d = await res.json();
         const text = d.content?.[0]?.text;
         if (!text) throw new Error("Risposta ai-proxy in formato inatteso");
-        if (text.startsWith("⚠️")) throw new Error(text);
+        if (text.startsWith("⚠️")) {
+          const isOverload = /429|overload|rate|quota|traffic|traffico/i.test(text);
+          if (isOverload && !retrying) {
+            // Gemini sovraccarico: aspetta un attimo e riprova automaticamente una volta
+            await new Promise(r => setTimeout(r, 3000));
+            return callAiProxy(prompt, true);
+          }
+          if (isOverload) throw new Error("⚠️ Gemini è momentaneamente sovraccarico (troppo traffico). Aspetta qualche secondo e riprova.");
+          throw new Error(text);
+        }
         return text;
       }
 
@@ -1478,14 +1487,18 @@
           ? "**Comandante**\n(scrivi SOLO il nome della creatura leggendaria scelta come comandante, una riga, nessun'altra informazione — questa carta va comunque ripetuta anche nella Lista mazzo qui sotto)\n\n"
           : "";
         const manaBaseGuidance = !isCommander ? "" :
-          "LINEE GUIDA BASE DI MANA (Commander, applica quella corrispondente al livello di potenza \""+powerLevel+"\"):\n"+
+          "SCELTA DEL NUMERO DI TERRE (Commander, livello \""+powerLevel+"\"):\n"+
+          "Non ti do un numero fisso di terre: decidilo TU, dopo aver scelto il comandante e delineato la curva di mana del mazzo, in modo che sia quello ottimale per QUESTA build specifica (non un numero standard scollegato dalle carte scelte). Usa questi criteri:\n"+
+          "- Parti dal costo e dai bisogni del comandante: se costa 5+ mana o il mazzo ha una curva alta, servono più terre; se il comandante e la strategia sono economici (curva bassa), ne servono meno.\n"+
+          "- Ogni 2-3 fonti di ramp/accelerazione di mana che includi ti permette di togliere circa 1 terra dalla base.\n"+
+          "- Mazzi mono-colore possono stare più bassi nel range (poco fixing necessario); mazzi 3-5 colori più alti (serve più fixing).\n"+
           (powerLevel==="cedh"
-            ? "- Livello cEDH competitivo: 28-33 terre totali SOLO SE il mazzo rispetta rigorosamente questi tre requisiti insieme: (1) pacchetto fast mana quasi completo (Sol Ring, Mana Crypt, Mana Vault, Mox/Lotus Petal se disponibili), (2) costo di mana medio (CMC) delle carte non-terra inferiore a 2.0, (3) numerosi cantrip/tutor a costo 1 (Ponder, ricerche a basso costo) per compensare le poche terre. Se non riesci a garantire tutti e tre i requisiti con le carte disponibili, sali a 34-36 terre invece di rischiare mana screw.\n"
+            ? "- Livello cEDH: puoi scendere fino a 28-33 terre SOLO SE includi un pacchetto fast mana pesante (Sol Ring, Mana Crypt, Mana Vault, Mox/Lotus Petal se disponibili), tieni il CMC medio delle non-terre sotto 2.0, e aggiungi molti cantrip/tutor a costo 1. Se il mazzo che stai costruendo non riesce a garantire tutto questo, usa 34-36 terre invece — non forzare un numero basso su un mazzo che non lo sostiene.\n"
             : powerLevel==="ottimizzato"
-            ? "- Livello ottimizzato: 34-37 terre come base, aggiustando in base alla curva (sali di 1-2 se il CMC medio supera 3, scendi di 1-2 se hai molto ramp economico a costo 1-2).\n"
-            : "- Livello casual: 36-38 terre come standard di sicurezza. Se il comandante costa 5+ mana o il mazzo ha una curva alta, sali a 39-41. Non scendere mai sotto le 35 in un mazzo casual, anche con del ramp: è la causa più comune di mano imbarazzata (mana screw).\n")+
-          "- Ogni 2-3 fonti di ramp/accelerazione di mana extra puoi togliere circa 1 terra dalla base, ma non oltre i minimi indicati sopra.\n"+
-          "- Mazzi mono-colore possono stare nella fascia bassa del range indicato (meno fixing di colore necessario); mazzi a 4-5 colori nella fascia alta.\n\n";
+            ? "- Livello ottimizzato: range di riferimento 34-38 terre, aggiustato secondo i criteri sopra.\n"
+            : "- Livello casual: range di riferimento 36-39 terre. Non scendere mai sotto 34 in un mazzo casual: è la causa più comune di mano imbarazzata (mana screw).\n")+
+          "- Qualunque numero scegli, il resto delle 99 carte (oltre al comandante) deve essere carte non-terra, per un totale ESATTO di 100.\n\n"+
+          "PRIMA DI SCRIVERE LA RISPOSTA FINALE: conta mentalmente le carte della tua Lista mazzo e verifica che sommino esattamente a 100 (1 comandante + terre + non-terre). Se il conteggio non torna, aggiusta la lista finché non è esatto — questo controllo è più importante di qualunque altro dettaglio.\n\n";
         const prompt = "Sei un esperto costruttore di mazzi Magic: The Gathering, con competenze da giudice/teorico del formato.\n\n"+
           "IMPORTANTE: rispondi in modo diretto e conciso. NON commentare la richiesta, NON fare premesse, NON esprimere opinioni. Vai dritto al contenuto richiesto.\n\n"+
           "PRIORITÀ ASSOLUTA: la Lista mazzo deve contenere ESATTAMENTE "+deckSize+" carte (conteggio totale delle copie, non dei titoli) — questo è il requisito più importante di tutta la risposta. Se lo spazio nella risposta è limitato, accorcia o ometti Strategia/Carte chiave/"+excludedLabel.replace(/\*/g,"")+" ma NON troncare mai la Lista mazzo: deve restare completa e integrale fino all'ultima carta.\n\n"+
@@ -1496,7 +1509,7 @@
           "STILE DI GIOCO RICHIESTO: "+deckStyle+styleDesc+"\n\n"+
           "Rispondi in italiano, in modo sintetico, con ESATTAMENTE questa struttura e in questo ordine:\n\n"+
           commanderSection+
-          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa, una riga per carta, in inglese così è ricercabile, senza descrizioni — deve sommare esattamente "+deckSize+" carte, rispettando la base di mana indicata sopra)\n\n"+
+          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa, una riga per carta, in inglese così è ricercabile, senza descrizioni — deve sommare esattamente "+deckSize+" carte, rispettando la composizione indicata sopra)\n\n"+
           "**Strategia del mazzo**\n(massimo 2 righe: come funziona, win condition)\n\n"+
           "**Carte chiave**\n(le 3 carte più importanti, una riga ciascuna)\n\n"+
           excludedLabel+"\n(max 2 carte, con prezzo stimato)\n\n"+
@@ -1528,21 +1541,27 @@
       async function saveAiDeckAsReal() {
         setSavingAiDeck(true);
         const section = extractAiSection(buildResult, "Lista mazzo");
-        const lines = parseAiDeckList(section);
+        let lines = parseAiDeckList(section);
         if (lines.length === 0) {
           alert("Non sono riuscito a leggere la lista carte dalla risposta dell'IA. Riprova a costruire il mazzo.");
           setSavingAiDeck(false); return;
         }
 
-        const totalQty = lines.reduce((s,l)=>s+l.qty,0);
+        const commanderName = (extractAiSection(buildResult, "Comandante")||"").trim().replace(/^-\s*/,"");
         const expectedSize = buildFormat==="Commander" ? 100 : 60;
-        if (Math.abs(totalQty - expectedSize) > 5) {
-          const tooMany = totalQty > expectedSize;
-          const proceed = confirm(`Attenzione: la lista generata ha ${totalQty} carte invece delle ${expectedSize} previste per ${buildFormat}${tooMany?" (l'IA non ha rispettato il limite)":" (probabilmente la risposta si è troncata)"}. Vuoi salvarlo comunque così com'è, oppure annulla e prova a rigenerarlo?`);
-          if (!proceed) { setSavingAiDeck(false); return; }
+
+        // Porta il comandante in cima, per coerenza visiva nella lista (non tocchiamo più il conteggio)
+        if (commanderName) {
+          const idx = lines.findIndex(l => l.name.toLowerCase()===commanderName.toLowerCase());
+          if (idx > 0) { const [cmd] = lines.splice(idx,1); lines.unshift(cmd); }
         }
 
-        const commanderName = (extractAiSection(buildResult, "Comandante")||"").trim().replace(/^-\s*/,"");
+        const totalQty = lines.reduce((s,l)=>s+l.qty,0);
+        if (Math.abs(totalQty - expectedSize) > 3) {
+          const tooMany = totalQty > expectedSize;
+          const proceed = confirm(`Attenzione: la lista generata ha ${totalQty} carte invece delle ${expectedSize} previste per ${buildFormat}${tooMany?" (l'IA non ha rispettato il limite)":" (probabilmente la risposta si è troncata)"}. Non taglio/aggiungo carte automaticamente per non rovinare le sinergie scelte dall'IA. Vuoi salvarlo comunque così com'è, oppure annulla e prova a rigenerarlo?`);
+          if (!proceed) { setSavingAiDeck(false); return; }
+        }
 
         let cardsOut = [];
         let missed = [];
