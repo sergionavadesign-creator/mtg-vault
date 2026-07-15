@@ -956,6 +956,7 @@
       const [advising, setAdvising] = useState(false);
       const [advisorMode, setAdvisorMode] = useState("analyze"); // analyze | build
       const [deckStyle, setDeckStyle] = useState("aggressivo");
+      const [buildSource, setBuildSource] = useState("collection"); // "collection" | "all"
       const [deckStyleDesc, setDeckStyleDesc] = useState("");
       const [buildFormat, setBuildFormat] = useState("Commander");
       const [buildResult, setBuildResult] = useState(null);
@@ -1453,20 +1454,23 @@
       async function buildDeckFromCollection() {
         setBuilding(true); setBuildResult(null);
         const allCards = collection.map(c => c.qty+"x "+c.name+" ("+c.type+", "+(c.manaCost||"")+ ")").join("\n");
-        if (!allCards) { setBuildResult("Aggiungi prima delle carte alla collezione."); setBuilding(false); return; }
+        if (buildSource==="collection" && !allCards) { setBuildResult("Aggiungi prima delle carte alla collezione."); setBuilding(false); return; }
 
         const styleDesc = deckStyleDesc.trim() ? "\nDettagli aggiuntivi: "+deckStyleDesc : "";
+        const sourceBlock = buildSource==="collection"
+          ? "CARTE DISPONIBILI IN COLLEZIONE:\n"+allCards+"\n\nCostruisci il miglior mazzo possibile usando SOLO le carte elencate sopra.\n\n"
+          : "Costruisci il miglior mazzo possibile usando QUALSIASI carta esistente di Magic: The Gathering legale nel formato indicato — non sei limitato a una collezione specifica, scegli le carte oggettivamente migliori per l'obiettivo.\n\n";
+        const excludedLabel = buildSource==="collection" ? "**Carte escluse dalla collezione**" : "**Carte più costose da acquistare**";
         const prompt = "Sei un esperto costruttore di mazzi Magic: The Gathering.\n\n"+
-          "IMPORTANTE: rispondi in modo diretto e conciso. NON commentare la richiesta, NON fare premesse, NON esprimere opinioni sulla collezione. Vai dritto al contenuto richiesto, iniziando subito dalla sezione **Lista mazzo**.\n\n"+
-          "CARTE DISPONIBILI IN COLLEZIONE:\n"+allCards+"\n\n"+
+          "IMPORTANTE: rispondi in modo diretto e conciso. NON commentare la richiesta, NON fare premesse, NON esprimere opinioni. Vai dritto al contenuto richiesto, iniziando subito dalla sezione **Lista mazzo**.\n\n"+
+          sourceBlock+
           "FORMATO: "+buildFormat+"\n"+
           "STILE DI GIOCO RICHIESTO: "+deckStyle+styleDesc+"\n\n"+
-          "Costruisci il miglior mazzo possibile usando SOLO le carte elencate sopra.\n\n"+
           "Rispondi in italiano, in modo sintetico, con ESATTAMENTE questa struttura:\n"+
-          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa, una riga per carta, senza descrizioni)\n\n"+
+          "**Lista mazzo**\n(formato: Nx Nome Carta per ogni carta inclusa, una riga per carta, in inglese così è ricercabile, senza descrizioni)\n\n"+
           "**Strategia del mazzo**\n(massimo 3 righe: come funziona, win condition)\n\n"+
           "**Carte chiave**\n(le 3-5 carte più importanti, una riga ciascuna)\n\n"+
-          "**Carte escluse dalla collezione**\n(max 3 carte che mancano e migliorerebbero il mazzo, con prezzo stimato)\n\n"+
+          excludedLabel+"\n(max 3 carte, con prezzo stimato)\n\n"+
           "Rispetta le regole del formato "+buildFormat+" (numero carte, ban list, ecc.).";
 
         try {
@@ -1500,20 +1504,67 @@
           alert("Non sono riuscito a leggere la lista carte dalla risposta dell'IA. Riprova a costruire il mazzo.");
           setSavingAiDeck(false); return;
         }
-        const cardsOut = [];
-        const missed = [];
-        lines.forEach(({qty,name}) => {
-          const match = collection.find(c =>
-            c.name.toLowerCase()===name.toLowerCase() || (c.printed_name||"").toLowerCase()===name.toLowerCase());
-          if (!match) { missed.push(name); return; }
-          cardsOut.push({ ...match, id: crypto.randomUUID(), qty });
-        });
-        const deck = { id: crypto.randomUUID(), name: saveDeckName.trim()||"Mazzo AI", format: buildFormat, cards: cardsOut, ownerId: activeProfileId, isImported: false };
+        let cardsOut = [];
+        let missed = [];
+
+        if (buildSource==="collection") {
+          lines.forEach(({qty,name}) => {
+            const match = collection.find(c =>
+              c.name.toLowerCase()===name.toLowerCase() || (c.printed_name||"").toLowerCase()===name.toLowerCase());
+            if (!match) { missed.push(name); return; }
+            cardsOut.push({ ...match, id: crypto.randomUUID(), qty });
+          });
+        } else {
+          // Modalità "tutte le carte": recupera i dati completi da Scryfall e traccia cosa possiedi già
+          const identifiers = lines.map(l => ({ name: l.name }));
+          const chunks = [];
+          for (let i=0; i<identifiers.length; i+=75) chunks.push(identifiers.slice(i,i+75));
+          const scryMap = {};
+          for (const chunk of chunks) {
+            try {
+              const res = await fetch("https://api.scryfall.com/cards/collection", {
+                method:"POST", headers:{"Content-Type":"application/json"},
+                body: JSON.stringify({ identifiers: chunk })
+              });
+              if (res.ok) {
+                const dd = await res.json();
+                (dd.data||[]).forEach(c => { scryMap[c.name.toLowerCase()] = c; });
+              }
+            } catch {}
+          }
+          const ownedByName = {};
+          collection.forEach(oc => {
+            const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
+            keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
+          });
+          lines.forEach(({qty,name}) => {
+            const sc = scryMap[name.toLowerCase()];
+            if (!sc) { missed.push(name); return; }
+            const canonicalName = canonicalCardName(sc.name);
+            const ownedQty = ownedByName[canonicalName] || 0;
+            cardsOut.push({
+              id: crypto.randomUUID(), scryfallId: sc.id, name: sc.name, printed_name: sc.printed_name||null,
+              set: sc.set_name, setCode: sc.set, collectorNumber: sc.collector_number,
+              rarity: sc.rarity, manaCost: sc.mana_cost||sc.card_faces?.[0]?.mana_cost||"",
+              colors: (sc.colors?.length?sc.colors:sc.card_faces?.[0]?.colors)||[], colorIdentity: sc.color_identity||[],
+              oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
+              type: sc.type_line||"", legalities: sc.legalities||{}, prices: sc.prices||{},
+              image: cardImage(sc), artCrop: cardArtCrop(sc),
+              qty, owned: ownedQty >= qty, ownedQty, imported: true
+            });
+          });
+        }
+
+        if (cardsOut.length === 0) {
+          alert("Non sono riuscito a trovare nessuna delle carte suggerite. Riprova a costruire il mazzo.");
+          setSavingAiDeck(false); return;
+        }
+        const deck = { id: crypto.randomUUID(), name: saveDeckName.trim()||"Mazzo AI", format: buildFormat, cards: cardsOut, ownerId: activeProfileId, isImported: buildSource==="all", folder: activeFolder||"" };
         await saveDeck(deck);
         persist({ ...data, decks: [...data.decks, deck] });
         setShowSaveDeckPopup(false); setSaveDeckName(""); setSavingAiDeck(false);
         setTab("decks"); setActiveDeck(deck.id); setDeckView("build");
-        if (missed.length) alert(`Il mazzo è stato creato, ma queste carte suggerite dall'IA non sono state trovate nella tua collezione e sono state saltate: ${missed.join(", ")}`);
+        if (missed.length) alert(`Il mazzo è stato creato, ma queste carte suggerite dall'IA non sono state trovate: ${missed.join(", ")}`);
       }
 
       // ── IMPORTA COLLEZIONE DA CSV ──────────────────────────
@@ -3053,7 +3104,29 @@
                 {advisorMode==="build" && (
                   <>
                     <div style={S.panel}>
-                      <div style={S.pt}>Crea un mazzo dalle tue carte</div>
+                      <div style={S.pt}>Crea un mazzo</div>
+
+                      <label style={S.lbl}>Sorgente carte</label>
+                      <div style={{display:"flex",gap:8,marginBottom:14}}>
+                        <button onClick={()=>setBuildSource("collection")}
+                          style={{flex:1,padding:"10px 6px",borderRadius:7,border:`1px solid ${buildSource==="collection"?"#f59e0b":"#2d2b3e"}`,
+                            background:buildSource==="collection"?"#1e1b2e":"transparent",color:buildSource==="collection"?"#f59e0b":"#94a3b8",
+                            cursor:"pointer",fontSize:12,fontWeight:buildSource==="collection"?700:400}}>
+                          📚 Dalla mia collezione
+                        </button>
+                        <button onClick={()=>setBuildSource("all")}
+                          style={{flex:1,padding:"10px 6px",borderRadius:7,border:`1px solid ${buildSource==="all"?"#f59e0b":"#2d2b3e"}`,
+                            background:buildSource==="all"?"#1e1b2e":"transparent",color:buildSource==="all"?"#f59e0b":"#94a3b8",
+                            cursor:"pointer",fontSize:12,fontWeight:buildSource==="all"?700:400}}>
+                          🌍 Tutte le carte esistenti
+                        </button>
+                      </div>
+                      {buildSource==="all" && (
+                        <div style={{fontSize:11,color:"#64748b",marginBottom:14}}>
+                          L'IA sceglierà liberamente tra tutte le carte di Magic, poi ti mostrerà quali possiedi già e quali dovrai cercare — come per i mazzi importati da Moxfield.
+                        </div>
+                      )}
+
                       <label style={S.lbl}>Formato</label>
                       <select style={{...S.sel,width:"100%",marginBottom:14}} value={buildFormat} onChange={e=>setBuildFormat(e.target.value)}>
                         {FORMATS.map(f=><option key={f}>{f}</option>)}
@@ -3077,13 +3150,15 @@
                           value={deckStyleDesc} onChange={e=>setDeckStyleDesc(e.target.value)} />
                       )}
 
-                      <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>
-                        Carte disponibili: <b style={{color:"#f8fafc"}}>{collection.length} titoli</b> · {collection.reduce((s,c)=>s+c.qty,0)} totali
-                      </div>
+                      {buildSource==="collection" && (
+                        <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>
+                          Carte disponibili: <b style={{color:"#f8fafc"}}>{collection.length} titoli</b> · {collection.reduce((s,c)=>s+c.qty,0)} totali
+                        </div>
+                      )}
 
-                      {collection.length===0 && <div style={{...S.empty,padding:"12px 0",marginBottom:12}}>Aggiungi carte alla collezione prima</div>}
+                      {buildSource==="collection" && collection.length===0 && <div style={{...S.empty,padding:"12px 0",marginBottom:12}}>Aggiungi carte alla collezione prima</div>}
                       <button style={{...S.btnP,width:"100%",padding:13,fontSize:15}}
-                        onClick={buildDeckFromCollection} disabled={collection.length===0||building}>
+                        onClick={buildDeckFromCollection} disabled={(buildSource==="collection"&&collection.length===0)||building}>
                         {building?"⏳ Costruzione mazzo in corso…":"⚡ Costruisci mazzo"}
                       </button>
                     </div>
