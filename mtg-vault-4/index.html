@@ -970,6 +970,7 @@
       const [buildFormat, setBuildFormat] = useState("Commander");
       const [buildResult, setBuildResult] = useState(null);
       const [building, setBuilding] = useState(false);
+      const [buildingStatus, setBuildingStatus] = useState(null);
       const [explainCard, setExplainCard] = useState(null);
       const [explainText, setExplainText] = useState(null);
       const [explaining, setExplaining] = useState(false);
@@ -1520,8 +1521,28 @@
           "Rispetta rigorosamente le regole del formato "+buildFormat+" (numero carte, singleton se Commander, ban list, ecc.).";
 
         try {
-          const text = await callAiProxy(prompt);
-          setBuildResult(text || "Nessuna risposta.");
+          let text = await callAiProxy(prompt);
+          if (!text) { setBuildResult("Nessuna risposta."); setBuilding(false); return; }
+
+          // Verifica automatica + correzione mirata (fino a 2 round) prima di mostrare il risultato
+          let roundsFixed = 0;
+          for (let round=0; round<2; round++) {
+            setBuildingStatus(round===0 ? "🔍 Verifico il mazzo generato…" : "🔧 Correggo i problemi trovati…");
+            let issues = [];
+            try { issues = await checkAiDeckIssues(text, buildFormat, deckSize); } catch { break; }
+            if (issues.length === 0) break;
+            setBuildingStatus(`🔧 Trovati ${issues.length} problemi, chiedo all'IA di correggerli…`);
+            const fixPrompt = "Il mazzo Magic: The Gathering che hai appena generato ha questi problemi da correggere, mantenendo INVARIATO tutto il resto (stesso comandante, stessa strategia, stesse altre carte):\n"+
+              issues.map(i=>"- "+i).join("\n")+"\n\n"+
+              "Rispondi di nuovo con la STESSA struttura completa di prima (Comandante se presente, Lista mazzo, Strategia del mazzo, Carte chiave, "+excludedLabel.replace(/\*/g,"")+"), già corretta. Cambia SOLO quello che serve per risolvere i problemi elencati.\n\n"+
+              "MAZZO DA CORREGGERE:\n"+text;
+            try {
+              text = await callAiProxy(fixPrompt);
+              roundsFixed++;
+            } catch { break; } // se la correzione fallisce, mostriamo comunque l'ultima versione buona
+          }
+          setBuildingStatus(null);
+          setBuildResult((roundsFixed>0 ? `✅ Verificato e corretto automaticamente (${roundsFixed} round).\n\n` : "") + text);
         } catch (e) { setBuildResult(e.message || "Errore di connessione. Riprova."); }
         setBuilding(false);
       }
@@ -1540,6 +1561,57 @@
             if (!m) return null;
             return { qty: parseInt(m[1]), name: m[2].trim() };
           }).filter(Boolean);
+      }
+
+      // Controllo deterministico (nessuna IA coinvolta) del mazzo appena generato: conteggio carte,
+      // singleton, limite 4 copie, identità cromatica. Restituisce una lista di problemi trovati (vuota se pulito).
+      async function checkAiDeckIssues(text, format, deckSize) {
+        const issues = [];
+        const lines = parseAiDeckList(extractAiSection(text, "Lista mazzo"));
+        const totalQty = lines.reduce((s,l)=>s+l.qty,0);
+        if (totalQty !== deckSize) issues.push(`la "Lista mazzo" somma ${totalQty} carte invece di ${deckSize} — ricontrolla il conteggio riga per riga`);
+        if (lines.length === 0) return issues; // niente da validare oltre
+
+        if (format === "Commander") {
+          const commanderName = (extractAiSection(text, "Comandante")||"").trim().replace(/^-\s*/,"");
+          if (!commanderName) issues.push('manca la sezione "**Comandante**" con il nome della creatura leggendaria scelta');
+
+          const nameCounts = {};
+          lines.forEach(l => { const k = canonicalCardName(l.name); nameCounts[k] = (nameCounts[k]||0) + l.qty; });
+          const dupes = Object.entries(nameCounts).filter(([k,n]) => n>1 && !BASIC_LAND_NAMES.has(k));
+          if (dupes.length) issues.push(`violazione regola singleton (una sola copia per carta, terre base escluse) per: ${dupes.map(([k])=>k).join(", ")}`);
+
+          if (commanderName && lines.length) {
+            const identifiers = lines.map(l=>({name:l.name}));
+            const chunks = []; for (let i=0;i<identifiers.length;i+=75) chunks.push(identifiers.slice(i,i+75));
+            const scryMap = {};
+            for (const chunk of chunks) {
+              try {
+                const res = await fetch("https://api.scryfall.com/cards/collection", {
+                  method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers: chunk })
+                });
+                if (res.ok) { const dd = await res.json(); (dd.data||[]).forEach(c=>{ scryMap[c.name.toLowerCase()] = c; }); }
+              } catch {}
+            }
+            const cmdCard = scryMap[commanderName.toLowerCase()];
+            if (cmdCard) {
+              const identity = new Set(cmdCard.color_identity||[]);
+              const offenders = [];
+              lines.forEach(l => {
+                const sc = scryMap[l.name.toLowerCase()];
+                if (!sc || sc.name.toLowerCase()===commanderName.toLowerCase()) return;
+                if ((sc.color_identity||[]).some(c=>!identity.has(c))) offenders.push(sc.name);
+              });
+              if (offenders.length) issues.push(`queste carte hanno un'identità cromatica fuori da quella del comandante (${[...identity].join("")||"incolore"}): ${offenders.join(", ")}`);
+            }
+          }
+        } else {
+          const nameCounts = {};
+          lines.forEach(l => { const k = canonicalCardName(l.name); nameCounts[k] = (nameCounts[k]||0) + l.qty; });
+          const over4 = Object.entries(nameCounts).filter(([k,n]) => n>4 && !BASIC_LAND_NAMES.has(k));
+          if (over4.length) issues.push(`limite di 4 copie superato per: ${over4.map(([k])=>k).join(", ")}`);
+        }
+        return issues;
       }
 
       async function saveAiDeckAsReal() {
@@ -3272,7 +3344,7 @@
                       {buildSource==="collection" && collection.length===0 && <div style={{...S.empty,padding:"12px 0",marginBottom:12}}>Aggiungi carte alla collezione prima</div>}
                       <button style={{...S.btnP,width:"100%",padding:13,fontSize:15}}
                         onClick={buildDeckFromCollection} disabled={(buildSource==="collection"&&collection.length===0)||building}>
-                        {building?"⏳ Costruzione mazzo in corso…":"⚡ Costruisci mazzo"}
+                        {building?(buildingStatus||"⏳ Costruzione mazzo in corso…"):"⚡ Costruisci mazzo"}
                       </button>
                     </div>
                     {buildResult && (() => {
