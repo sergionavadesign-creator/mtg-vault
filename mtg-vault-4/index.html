@@ -1487,6 +1487,8 @@
         const commanderSection = isCommander
           ? "**Comandante**\n(scrivi SOLO il nome della creatura leggendaria scelta come comandante, una riga, nessun'altra informazione — questa carta va comunque ripetuta anche nella Lista mazzo qui sotto)\n\n"
           : "";
+        const colorIdentityGuidance = !isCommander ? "" :
+          "REGOLA FERREA SULL'IDENTITÀ CROMATICA: ogni singola carta della Lista mazzo (comprese le terre non base, i tri-land, gli shockland, i talismani/segnali di mana e qualunque permanente che produce o richiede mana) deve avere un'identità cromatica che è un SOTTOINSIEME di quella del comandante scelto. Concretamente: se il comandante è a 2 colori (es. Rosso/Bianco), NON puoi includere terre o carte che coinvolgono un terzo colore (es. niente terre Temur/Bant/tri-color, niente talismani di un colore estraneo), nemmeno se sarebbero ottime carte in astratto. Scegli il comandante PRIMA e vincola ogni scelta successiva alla sua identità cromatica esatta — questo vincolo ha priorità sulla qualità delle singole carte.\n\n";
         const manaBaseGuidance = !isCommander ? "" :
           "SCELTA DEL NUMERO DI TERRE (Commander, livello \""+powerLevel+"\"):\n"+
           "Non ti do un numero fisso di terre: decidilo TU, dopo aver scelto il comandante e delineato la curva di mana del mazzo, in modo che sia quello ottimale per QUESTA build specifica (non un numero standard scollegato dalle carte scelte). Usa questi criteri:\n"+
@@ -1504,6 +1506,7 @@
           "IMPORTANTE: rispondi in modo diretto e conciso. NON commentare la richiesta, NON fare premesse, NON esprimere opinioni. Vai dritto al contenuto richiesto.\n\n"+
           "PRIORITÀ ASSOLUTA: la Lista mazzo deve contenere ESATTAMENTE "+deckSize+" carte (conteggio totale delle copie, non dei titoli) — questo è il requisito più importante di tutta la risposta. Se lo spazio nella risposta è limitato, accorcia o ometti Strategia/Carte chiave/"+excludedLabel.replace(/\*/g,"")+" ma NON troncare mai la Lista mazzo: deve restare completa e integrale fino all'ultima carta.\n\n"+
           sourceBlock+
+          colorIdentityGuidance+
           manaBaseGuidance+
           "FORMATO: "+buildFormat+"\n"+
           (isCommander ? "LIVELLO DI POTENZA: "+powerLevel+"\n" : "")+
@@ -1597,6 +1600,20 @@
             const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
             keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
           });
+
+          // Per i nomi che la ricerca esatta non ha trovato, riprova con la ricerca "fuzzy"
+          // (tollerante a piccole differenze) prima di arrenderti — più affidabile che scartare la carta
+          const stillMissing = lines.filter(l => !scryMap[l.name.toLowerCase()]);
+          for (const l of stillMissing) {
+            try {
+              const r = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(l.name)}`);
+              if (r.ok) {
+                const sc = await r.json();
+                if (sc && sc.name) scryMap[l.name.toLowerCase()] = sc;
+              }
+            } catch {}
+          }
+
           lines.forEach(({qty,name}) => {
             const sc = scryMap[name.toLowerCase()];
             if (!sc) { missed.push(name); return; }
