@@ -1403,7 +1403,8 @@
       // Chiama la Edge Function ai-proxy (Gemini). Contratto confermato dal codice sorgente:
       // richiesta { messages: [{ role:"user", content: prompt }] } (come l'API Anthropic),
       // risposta { content: [{ type:"text", text: "..." }] }.
-      async function callAiProxy(prompt, retrying) {
+      async function callAiProxy(prompt, attempt) {
+        attempt = attempt || 0;
         const res = await fetch(`${SUPABASE_URL}/functions/v1/ai-proxy`, {
           method:"POST",
           headers:{ "Content-Type":"application/json", apikey: SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}` },
@@ -1414,13 +1415,13 @@
         const text = d.content?.[0]?.text;
         if (!text) throw new Error("Risposta ai-proxy in formato inatteso");
         if (text.startsWith("⚠️")) {
-          const isOverload = /429|overload|rate|quota|traffic|traffico/i.test(text);
-          if (isOverload && !retrying) {
-            // Gemini sovraccarico: aspetta un attimo e riprova automaticamente una volta
-            await new Promise(r => setTimeout(r, 3000));
-            return callAiProxy(prompt, true);
+          const isOverload = /429|503|overload|rate|quota|traffic|traffico|high demand|unavailable|momentaneamente|temporarily/i.test(text);
+          if (isOverload && attempt < 2) {
+            // Gemini sovraccarico: aspetta un po' di più ad ogni tentativo e riprova (max 2 volte)
+            await new Promise(r => setTimeout(r, 3000 + attempt*3000));
+            return callAiProxy(prompt, attempt+1);
           }
-          if (isOverload) throw new Error("⚠️ Gemini è momentaneamente sovraccarico (troppo traffico). Aspetta qualche secondo e riprova.");
+          if (isOverload) throw new Error("⚠️ Gemini è momentaneamente sovraccarico (troppa richiesta sui suoi server). Aspetta un minuto e riprova.");
           throw new Error(text);
         }
         return text;
@@ -3257,15 +3258,27 @@
                         {building?"⏳ Costruzione mazzo in corso…":"⚡ Costruisci mazzo"}
                       </button>
                     </div>
-                    {buildResult && (
-                      <div style={{...S.panel,borderColor:"#1a3a2a"}} className="fade-in">
-                        <div style={{fontSize:13,fontWeight:700,color:"#34d399",marginBottom:14}}>⚡ Mazzo costruito</div>
-                        {renderAdvisor(buildResult)}
-                        <button style={{...S.btnP,width:"100%",padding:12,marginTop:10}} onClick={()=>setShowSaveDeckPopup(true)}>
-                          💾 Salva come mazzo
-                        </button>
-                      </div>
-                    )}
+                    {buildResult && (() => {
+                      const isError = buildResult.startsWith("⚠️");
+                      return (
+                        <div style={{...S.panel,borderColor:isError?"#7f1d1d":"#1a3a2a"}} className="fade-in">
+                          <div style={{fontSize:13,fontWeight:700,color:isError?"#f87171":"#34d399",marginBottom:14}}>
+                            {isError ? "⚠️ Errore" : "⚡ Mazzo costruito"}
+                          </div>
+                          {renderAdvisor(buildResult)}
+                          {!isError && (
+                            <button style={{...S.btnP,width:"100%",padding:12,marginTop:10}} onClick={()=>setShowSaveDeckPopup(true)}>
+                              💾 Salva come mazzo
+                            </button>
+                          )}
+                          {isError && (
+                            <button style={{...S.btnGhost,width:"100%",padding:12,marginTop:10}} onClick={buildDeckFromCollection}>
+                              🔄 Riprova
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </>
                 )}
               </div>
