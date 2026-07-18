@@ -22,56 +22,46 @@
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
     @keyframes manaPulseFade { 0% { opacity:.55; } 100% { opacity:0; } }
 
-    .manaAnim-U, .manaAnim-G, .manaAnim-R, .manaAnim-W, .manaAnim-B { position:relative; }
-    .manaAnim-U::before, .manaAnim-U::after,
-    .manaAnim-G::before, .manaAnim-R::before, .manaAnim-R::after,
-    .manaAnim-W::before, .manaAnim-B::before {
-      content:""; position:absolute; pointer-events:none; z-index:0;
-    }
-    .manaAnim-U::before {
-      inset:-50%;
-      background: repeating-linear-gradient(200deg, rgba(255,255,255,.32) 0px, rgba(255,255,255,.32) 22px, transparent 22px, transparent 60px);
+    .manaOverlay-U {
+      background:
+        repeating-linear-gradient(200deg, rgba(255,255,255,.32) 0px, rgba(255,255,255,.32) 22px, transparent 22px, transparent 60px),
+        repeating-linear-gradient(160deg, rgba(180,230,255,.22) 0px, rgba(180,230,255,.22) 14px, transparent 14px, transparent 50px);
+      background-size: 200% 200%;
       animation: waterWave 3s linear infinite;
     }
-    .manaAnim-U::after {
-      inset:-50%;
-      background: repeating-linear-gradient(160deg, rgba(180,230,255,.22) 0px, rgba(180,230,255,.22) 14px, transparent 14px, transparent 50px);
-      animation: waterWave2 4.2s linear infinite;
+    @keyframes waterWave {
+      0% { background-position: 0% 0%, 0% 0%; }
+      100% { background-position: -260px 180px, 200px -160px; }
     }
-    @keyframes waterWave { from { transform:translate(0,0); } to { transform:translate(-260px,180px); } }
-    @keyframes waterWave2 { from { transform:translate(0,0); } to { transform:translate(200px,-160px); } }
 
-    .manaAnim-R::before {
-      inset:-20%;
-      background: radial-gradient(circle at 50% 100%, rgba(255,200,90,.85), transparent 55%);
-      animation: fireFlicker 0.7s ease-in-out infinite alternate;
+    .manaOverlay-R {
+      background:
+        radial-gradient(circle at 50% 100%, rgba(255,200,90,.85), transparent 55%),
+        radial-gradient(circle at 40% 90%, rgba(255,120,40,.7), transparent 45%);
       mix-blend-mode: screen;
+      animation: fireFlicker 0.6s ease-in-out infinite alternate;
     }
-    .manaAnim-R::after {
-      inset:-10%;
-      background: radial-gradient(circle at 40% 90%, rgba(255,120,40,.7), transparent 45%);
-      animation: fireFlicker2 0.5s ease-in-out infinite alternate;
-      mix-blend-mode: screen;
+    @keyframes fireFlicker {
+      0%   { opacity:.45; transform:scale(1)    translateY(0); }
+      50%  { opacity:1;   transform:scale(1.22) translateY(-16px); }
+      100% { opacity:.55; transform:scale(.92)  translateY(4px); }
     }
-    @keyframes fireFlicker { 0%{opacity:.4; transform:scale(1) translateY(0);} 50%{opacity:1; transform:scale(1.25) translateY(-18px);} 100%{opacity:.5; transform:scale(.9) translateY(4px);} }
-    @keyframes fireFlicker2 { 0%{opacity:.3; transform:scale(.95) translateX(-6px);} 100%{opacity:.9; transform:scale(1.15) translateX(8px);} }
 
-    .manaAnim-G::before {
-      inset:-30%;
-      background: radial-gradient(circle at 30% 40%, rgba(140,255,160,.4), transparent 50%), radial-gradient(circle at 70% 65%, rgba(90,220,120,.35), transparent 50%);
+    .manaOverlay-G {
+      background:
+        radial-gradient(circle at 30% 40%, rgba(140,255,160,.4), transparent 50%),
+        radial-gradient(circle at 70% 65%, rgba(90,220,120,.35), transparent 50%);
       animation: leafSway 3s ease-in-out infinite alternate;
     }
     @keyframes leafSway { from { transform:translateX(-35px) rotate(-4deg) scale(1);} to { transform:translateX(35px) rotate(4deg) scale(1.1);} }
 
-    .manaAnim-W::before {
-      inset:-20%;
+    .manaOverlay-W {
       background: radial-gradient(circle at 50% 30%, rgba(255,255,255,.7), transparent 55%);
       animation: lightPulse 1.4s ease-in-out infinite;
     }
     @keyframes lightPulse { 0%,100%{opacity:.2; transform:scale(.9);} 50%{opacity:.85; transform:scale(1.15);} }
 
-    .manaAnim-B::before {
-      inset:-60%;
+    .manaOverlay-B {
       background: conic-gradient(from 0deg, transparent, rgba(120,60,170,.55), transparent 45%, rgba(80,30,120,.4), transparent 90%);
       animation: voidSwirl 4s linear infinite;
     }
@@ -790,6 +780,36 @@
     // ── MAIN APP ─────────────────────────────────────────────
     // ── STATISTICHE COLLEZIONE ────────────────────────────────
     const COLOR_LABELS = { W:"⚪ Bianco", U:"🔵 Blu", B:"⚫ Nero", R:"🔴 Rosso", G:"🟢 Verde" };
+    // Ruota il contenuto di 90°/-90°/180° riempiendo ESATTAMENTE il contenitore, misurando le
+    // dimensioni reali con ResizeObserver e scambiando larghezza/altezza matematicamente
+    // (un trucco CSS approssimativo non basta: serve la misura vera dello schermo).
+    function RotatedFillBox({ deg, className, style, children }) {
+      const outerRef = useRef(null);
+      const [size, setSize] = useState({ w: 0, h: 0 });
+      useEffect(() => {
+        const el = outerRef.current;
+        if (!el) return;
+        const update = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+        update();
+        const ro = new ResizeObserver(update);
+        ro.observe(el);
+        return () => ro.disconnect();
+      }, []);
+      const swapped = ((deg % 180) + 180) % 180 === 90; // 90 o -90 -> scambia larghezza/altezza
+      const innerW = swapped ? size.h : size.w;
+      const innerH = swapped ? size.w : size.h;
+      return (
+        <div ref={outerRef} style={{ position:"relative", overflow:"hidden", width:"100%", height:"100%" }}>
+          {size.w>0 && size.h>0 && (
+            <div className={className} style={{ ...style, position:"absolute", top:"50%", left:"50%",
+              width:innerW, height:innerH, transform:`translate(-50%,-50%) rotate(${deg}deg)` }}>
+              {children}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function CollectionStats({ collection, ownedCardPrice }) {
       const byRarity = {};
       const byColor = { W:0, U:0, B:0, R:0, G:0, C:0 };
@@ -2983,16 +3003,17 @@
                     )}
                     <div style={{display:"flex",flexDirection:"column",gap:12}}>
                       {livePlayers.map(p => (
-                        <div key={p.id} className={p.manaColors?.length===1?`manaAnim-${p.manaColors[0]}`:""} style={{...S.panel,position:"relative",overflow:"hidden",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,
+                        <div key={p.id} style={{...S.panel,position:"relative",overflow:"hidden",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,
                           ...(isPlayerKO(p)?{opacity:.5}:{}),
                           ...(manaThemeBackground(p.manaColors)
                             ? {background: manaThemeBackground(p.manaColors)}
                             : p.bgImage
                             ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.75:.55}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}
                             : (p.customColor ? {background:p.customColor} : {}))}}>
+                          {p.manaColors?.length===1 && <div className={`manaOverlay-${p.manaColors[0]}`} style={S.manaOverlayBase}></div>}
                           {manaThemeBackground(p.manaColors) && p.pulseAt>0 && <div key={p.pulseAt} style={S.manaPulse}></div>}
-                          {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+                          {isPlayerKO(p) && <div style={{...S.koBadge,zIndex:2}}>☠️ ELIMINATO</div>}
+                          <div style={{position:"relative",zIndex:1,display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
                             <div style={{cursor:"pointer"}} onClick={()=>{setPlayerPopupFor(p.id);setPlayerPopupTab("giocatore");}}>
                               <div style={{fontWeight:700,fontSize:15,textDecoration:"underline",textDecorationStyle:"dotted",textDecorationColor:"#64748b"}}>{p.name}</div>
                               {p.deckName && <div style={{fontSize:11,color:"#94a3b8"}}>{p.deckName}</div>}
@@ -3005,7 +3026,7 @@
                               </div>
                             )}
                           </div>
-                          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:8}}>
+                          <div style={{position:"relative",zIndex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:8}}>
                             <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-5)}>−5</button>
                             <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−1</button>
                             <div style={{fontSize:40,fontWeight:800,minWidth:70,textAlign:"center",color:p.life<=10?"#f87171":"#f8fafc"}}>{p.life}</div>
@@ -3013,7 +3034,7 @@
                             <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,5)}>+5</button>
                           </div>
                           {p.enabledCounters?.length>0 && (
-                            <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>
+                            <div style={{position:"relative",zIndex:1,display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>
                               {p.enabledCounters.map(key => {
                                 const ct = EXTRA_COUNTER_TYPES.find(c=>c.key===key);
                                 if (!ct) return null;
@@ -3028,7 +3049,7 @@
                             </div>
                           )}
                           {trackCmdDamage && livePlayers.length>1 && (
-                            <div>
+                            <div style={{position:"relative",zIndex:1}}>
                               <button style={S.statsToggle} onClick={()=>setExpandedCmd(expandedCmd===p.id?null:p.id)}>
                                 ⚔️ Danno comandante {expandedCmd===p.id?"▾":"▸"}
                               </button>
@@ -3130,34 +3151,36 @@
                   const renderCell = (p, idx, cols, isTop) => {
                     const deg = cellRotation(idx, cols, isTop);
                     const manaBg = manaThemeBackground(p.manaColors);
-                    const themeClass = p.manaColors?.length===1 ? `manaAnim-${p.manaColors[0]}` : "";
+                    const overlayClass = p.manaColors?.length===1 ? `manaOverlay-${p.manaColors[0]}` : null;
                     return (
                     <div key={p.id} style={{...S.tableCell, ...(isPlayerKO(p)?{opacity:.45}:{})}}>
-                      <div className={themeClass} style={{...S.tableCellInner, transform: `rotate(${deg}deg)`,
+                      <RotatedFillBox deg={deg} style={{
+                        display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:10,
                         ...(manaBg ? { background: manaBg } :
                           colorizePanels ? { background: colorIdentityBg(p) } :
                           p.bgImage ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.7:.5}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"} :
                           p.customColor ? {background:p.customColor} : {})}}>
+                        {overlayClass && <div className={overlayClass} style={S.manaOverlayBase}></div>}
                         {manaBg && p.pulseAt>0 && (
                           <div key={p.pulseAt} style={S.manaPulse}></div>
                         )}
-                        {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
-                        <div style={{fontWeight:700,fontSize:14,marginBottom:2,color:colorizePanels?"#0a0a0f":"#f8fafc",cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted"}}
+                        {isPlayerKO(p) && <div style={{...S.koBadge,zIndex:2}}>☠️ ELIMINATO</div>}
+                        <div style={{position:"relative",zIndex:1,fontWeight:700,fontSize:14,marginBottom:2,color:colorizePanels?"#0a0a0f":"#f8fafc",cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted"}}
                           onClick={()=>{setPlayerPopupFor(p.id);setPlayerPopupTab("giocatore");}}>{p.name}</div>
-                        {p.deckName && <div style={{fontSize:10,marginBottom:6,color:colorizePanels?"#2a2a2a":"#94a3b8"}}>{p.deckName}</div>}
-                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                        {p.deckName && <div style={{position:"relative",zIndex:1,fontSize:10,marginBottom:6,color:colorizePanels?"#2a2a2a":"#94a3b8"}}>{p.deckName}</div>}
+                        <div style={{position:"relative",zIndex:1,display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
                           <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−</button>
                           <div style={{fontSize:36,fontWeight:800,minWidth:60,textAlign:"center",color:colorizePanels?"#0a0a0f":(p.life<=10?"#f87171":"#f8fafc")}}>{p.life}</div>
                           <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+</button>
                         </div>
                         {trackPoison && (
-                          <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11}}>
+                          <div style={{position:"relative",zIndex:1,display:"flex",alignItems:"center",gap:6,fontSize:11}}>
                             <span style={{color:"#166534"}}>☠️ {p.poison}</span>
                             <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
                             <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
                           </div>
                         )}
-                      </div>
+                      </RotatedFillBox>
                     </div>
                   );};
                   return (
@@ -3667,7 +3690,7 @@
       tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
       tableHalf:{flex:1,display:"grid",gap:1,minHeight:0},
       tableCell:{background:"#12101a",border:"1px solid rgba(255,255,255,.08)",overflow:"hidden",position:"relative"},
-      tableCellInner:{position:"absolute",top:"-100%",left:"-100%",width:"300%",height:"300%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:10},
+      manaOverlayBase:{position:"absolute",inset:0,pointerEvents:"none",zIndex:0},
       tableBgBtn:{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:"50%",background:"rgba(10,10,15,.7)",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:12,cursor:"pointer"},
       koBadge:{position:"absolute",top:8,left:"50%",transform:"translateX(-50%)",background:"#7f1d1d",color:"#fca5a5",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:12,zIndex:2},
       manaPulse:{position:"absolute",inset:0,background:"rgba(255,255,255,.35)",animation:"manaPulseFade .7s ease-out forwards",pointerEvents:"none",zIndex:1},
