@@ -783,6 +783,59 @@
     // Ruota il contenuto di 90°/-90°/180° riempiendo ESATTAMENTE il contenitore, misurando le
     // dimensioni reali con ResizeObserver e scambiando larghezza/altezza matematicamente
     // (un trucco CSS approssimativo non basta: serve la misura vera dello schermo).
+    // Sfondi REALI (video + audio registrati, non generati) per i colori che ne hanno uno —
+    // i file vanno caricati nella stessa cartella di index.html su GitHub. Se un colore non è
+    // presente qui, si usa il fallback a gradiente CSS animato definito dentro App.
+    const MEDIA_THEMES = {
+      B: { video: "palude.mp4", audio: "palude.mp3" },
+    };
+    // Registro condiviso degli elementi video attivi, per poterli "risvegliare" al primo
+    // tocco utile se il browser ha bloccato l'autoplay iniziale (politica comune sui mobile)
+    const mediaElementsRegistry = new Set();
+    function registerMedia(el) { if (el) mediaElementsRegistry.add(el); }
+    function unregisterMedia(el) { if (el) mediaElementsRegistry.delete(el); }
+    function tryResumeAllMedia() {
+      mediaElementsRegistry.forEach(el => { if (el && el.paused) el.play().catch(()=>{}); });
+    }
+    // Audio "a tocco": non un sottofondo continuo, riparte da capo a ogni cambio vita e si
+    // ferma dopo un breve tratto con una piccola dissolvenza invece di un taglio netto
+    const mediaAudioByPlayer = new Map();
+    function triggerMediaCue(playerId) {
+      const audio = mediaAudioByPlayer.get(playerId);
+      if (!audio) return;
+      clearTimeout(audio._cueStopTimer);
+      clearInterval(audio._cueFadeTimer);
+      audio.currentTime = 0;
+      audio.volume = 0.55;
+      audio.play().catch(()=>{});
+      audio._cueStopTimer = setTimeout(() => {
+        audio._cueFadeTimer = setInterval(() => {
+          if (audio.volume > 0.05) audio.volume = Math.max(0, audio.volume - 0.05);
+          else { clearInterval(audio._cueFadeTimer); audio.pause(); }
+        }, 40);
+      }, 900);
+    }
+    function MediaThemeBackground({ colorKey, playerId }) {
+      const theme = MEDIA_THEMES[colorKey];
+      const videoRef = useRef(null);
+      const audioRef = useRef(null);
+      useEffect(() => {
+        const v = videoRef.current, a = audioRef.current;
+        registerMedia(v);
+        if (v) v.play().catch(()=>{});
+        if (a) { a.volume = 0.55; mediaAudioByPlayer.set(playerId, a); }
+        return () => { unregisterMedia(v); mediaAudioByPlayer.delete(playerId); };
+      }, [playerId]);
+      if (!theme) return null;
+      return (
+        <>
+          <video ref={videoRef} src={theme.video} muted loop playsInline
+            style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",zIndex:0}} />
+          {theme.audio && <audio ref={audioRef} src={theme.audio} style={{display:"none"}} />}
+        </>
+      );
+    }
+
     function RotatedFillBox({ deg, className, style, children }) {
       const outerRef = useRef(null);
       const [size, setSize] = useState({ w: 0, h: 0 });
@@ -1360,7 +1413,10 @@
         pushUndo();
         setLivePlayers(ps => ps.map(p => p.id===id ? { ...p, life: p.life+delta, pulseAt: Date.now() } : p));
         const player = livePlayers.find(p=>p.id===id);
-        if (player?.manaColors?.length) playManaSound(player.manaColors);
+        const hasMediaTheme = player?.manaColors?.length===1 && MEDIA_THEMES[player.manaColors[0]];
+        if (player?.manaColors?.length && !hasMediaTheme) playManaSound(player.manaColors);
+        if (hasMediaTheme) triggerMediaCue(id);
+        tryResumeAllMedia();
       }
       function adjustPoison(id, delta) {
         pushUndo();
@@ -1443,6 +1499,9 @@
         const stops = colors.map((c,i) => `${MANA_THEME_SOLID[c]} ${Math.round(i/colors.length*100)}%`);
         return `linear-gradient(160deg, ${stops.join(", ")})`;
       }
+
+      // (Sfondi reali video/audio: definiti a livello di modulo sotto, non qui dentro App)
+
       // Suono sintetico breve e distinto per colore (Web Audio API — non un file audio registrato,
       // ma un cenno sonoro tematico generato al volo: onda discendente per il blu, tono caldo per
       // il rosso, ecc.) riprodotto quando cambia la vita di un giocatore con un tema mana attivo
@@ -3002,16 +3061,22 @@
                       </div>
                     )}
                     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                      {livePlayers.map(p => (
+                      {livePlayers.map(p => {
+                        const primaryColor = p.manaColors?.length===1 ? p.manaColors[0] : null;
+                        const mediaTheme = primaryColor ? MEDIA_THEMES[primaryColor] : null;
+                        return (
                         <div key={p.id} style={{...S.panel,position:"relative",overflow:"hidden",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,
                           ...(isPlayerKO(p)?{opacity:.5}:{}),
-                          ...(manaThemeBackground(p.manaColors)
+                          ...(mediaTheme ? {} :
+                            manaThemeBackground(p.manaColors)
                             ? {background: manaThemeBackground(p.manaColors)}
                             : p.bgImage
                             ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.75:.55}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"}
                             : (p.customColor ? {background:p.customColor} : {}))}}>
-                          {p.manaColors?.length===1 && <div className={`manaOverlay-${p.manaColors[0]}`} style={S.manaOverlayBase}></div>}
-                          {manaThemeBackground(p.manaColors) && p.pulseAt>0 && <div key={p.pulseAt} style={S.manaPulse}></div>}
+                          {mediaTheme && <MediaThemeBackground colorKey={primaryColor} playerId={p.id} />}
+                          {mediaTheme && <div style={{position:"absolute",inset:0,background:"rgba(10,10,15,.35)",zIndex:0}}></div>}
+                          {!mediaTheme && primaryColor && <div className={`manaOverlay-${primaryColor}`} style={S.manaOverlayBase}></div>}
+                          {(mediaTheme || manaThemeBackground(p.manaColors)) && p.pulseAt>0 && <div key={p.pulseAt} style={S.manaPulse}></div>}
                           {isPlayerKO(p) && <div style={{...S.koBadge,zIndex:2}}>☠️ ELIMINATO</div>}
                           <div style={{position:"relative",zIndex:1,display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
                             <div style={{cursor:"pointer"}} onClick={()=>{setPlayerPopupFor(p.id);setPlayerPopupTab("giocatore");}}>
@@ -3068,7 +3133,7 @@
                             </div>
                           )}
                         </div>
-                      ))}
+                      );})}
                     </div>
                   </>
                 )}
@@ -3150,8 +3215,10 @@
                   };
                   const renderCell = (p, idx, cols, isTop) => {
                     const deg = cellRotation(idx, cols, isTop);
-                    const manaBg = manaThemeBackground(p.manaColors);
-                    const overlayClass = p.manaColors?.length===1 ? `manaOverlay-${p.manaColors[0]}` : null;
+                    const primaryColor = p.manaColors?.length===1 ? p.manaColors[0] : null;
+                    const mediaTheme = primaryColor ? MEDIA_THEMES[primaryColor] : null;
+                    const manaBg = mediaTheme ? null : manaThemeBackground(p.manaColors);
+                    const overlayClass = (!mediaTheme && primaryColor) ? `manaOverlay-${primaryColor}` : null;
                     return (
                     <div key={p.id} style={{...S.tableCell, ...(isPlayerKO(p)?{opacity:.45}:{})}}>
                       <RotatedFillBox deg={deg} style={{
@@ -3160,8 +3227,10 @@
                           colorizePanels ? { background: colorIdentityBg(p) } :
                           p.bgImage ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.7:.5}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"} :
                           p.customColor ? {background:p.customColor} : {})}}>
+                        {mediaTheme && <MediaThemeBackground colorKey={primaryColor} playerId={p.id} />}
+                        {mediaTheme && <div style={{position:"absolute",inset:0,background:"rgba(10,10,15,.35)",zIndex:0}}></div>}
                         {overlayClass && <div className={overlayClass} style={S.manaOverlayBase}></div>}
-                        {manaBg && p.pulseAt>0 && (
+                        {(manaBg||mediaTheme) && p.pulseAt>0 && (
                           <div key={p.pulseAt} style={S.manaPulse}></div>
                         )}
                         {isPlayerKO(p) && <div style={{...S.koBadge,zIndex:2}}>☠️ ELIMINATO</div>}
@@ -3688,8 +3757,8 @@
       filterBadge:{marginLeft:5,color:"#f59e0b",fontSize:10},
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
       tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
-      tableHalf:{flex:1,display:"grid",gap:1,minHeight:0},
-      tableCell:{background:"#12101a",border:"1px solid rgba(255,255,255,.08)",overflow:"hidden",position:"relative"},
+      tableHalf:{flex:1,display:"grid",gap:6,padding:6,minHeight:0},
+      tableCell:{background:"#12101a",border:"1px solid rgba(255,255,255,.08)",borderRadius:16,overflow:"hidden",position:"relative"},
       manaOverlayBase:{position:"absolute",inset:0,pointerEvents:"none",zIndex:0},
       tableBgBtn:{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:"50%",background:"rgba(10,10,15,.7)",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:12,cursor:"pointer"},
       koBadge:{position:"absolute",top:8,left:"50%",transform:"translateX(-50%)",background:"#7f1d1d",color:"#fca5a5",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:12,zIndex:2},
