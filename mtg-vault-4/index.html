@@ -21,6 +21,61 @@
     .fade-in { animation: fadeIn .25s ease; }
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
     @keyframes manaPulseFade { 0% { opacity:.55; } 100% { opacity:0; } }
+
+    .manaAnim-U, .manaAnim-G, .manaAnim-R, .manaAnim-W, .manaAnim-B { position:relative; }
+    .manaAnim-U::before, .manaAnim-U::after,
+    .manaAnim-G::before, .manaAnim-R::before, .manaAnim-R::after,
+    .manaAnim-W::before, .manaAnim-B::before {
+      content:""; position:absolute; pointer-events:none; z-index:0;
+    }
+    .manaAnim-U::before {
+      inset:-50%;
+      background: repeating-linear-gradient(200deg, rgba(255,255,255,.32) 0px, rgba(255,255,255,.32) 22px, transparent 22px, transparent 60px);
+      animation: waterWave 3s linear infinite;
+    }
+    .manaAnim-U::after {
+      inset:-50%;
+      background: repeating-linear-gradient(160deg, rgba(180,230,255,.22) 0px, rgba(180,230,255,.22) 14px, transparent 14px, transparent 50px);
+      animation: waterWave2 4.2s linear infinite;
+    }
+    @keyframes waterWave { from { transform:translate(0,0); } to { transform:translate(-260px,180px); } }
+    @keyframes waterWave2 { from { transform:translate(0,0); } to { transform:translate(200px,-160px); } }
+
+    .manaAnim-R::before {
+      inset:-20%;
+      background: radial-gradient(circle at 50% 100%, rgba(255,200,90,.85), transparent 55%);
+      animation: fireFlicker 0.7s ease-in-out infinite alternate;
+      mix-blend-mode: screen;
+    }
+    .manaAnim-R::after {
+      inset:-10%;
+      background: radial-gradient(circle at 40% 90%, rgba(255,120,40,.7), transparent 45%);
+      animation: fireFlicker2 0.5s ease-in-out infinite alternate;
+      mix-blend-mode: screen;
+    }
+    @keyframes fireFlicker { 0%{opacity:.4; transform:scale(1) translateY(0);} 50%{opacity:1; transform:scale(1.25) translateY(-18px);} 100%{opacity:.5; transform:scale(.9) translateY(4px);} }
+    @keyframes fireFlicker2 { 0%{opacity:.3; transform:scale(.95) translateX(-6px);} 100%{opacity:.9; transform:scale(1.15) translateX(8px);} }
+
+    .manaAnim-G::before {
+      inset:-30%;
+      background: radial-gradient(circle at 30% 40%, rgba(140,255,160,.4), transparent 50%), radial-gradient(circle at 70% 65%, rgba(90,220,120,.35), transparent 50%);
+      animation: leafSway 3s ease-in-out infinite alternate;
+    }
+    @keyframes leafSway { from { transform:translateX(-35px) rotate(-4deg) scale(1);} to { transform:translateX(35px) rotate(4deg) scale(1.1);} }
+
+    .manaAnim-W::before {
+      inset:-20%;
+      background: radial-gradient(circle at 50% 30%, rgba(255,255,255,.7), transparent 55%);
+      animation: lightPulse 1.4s ease-in-out infinite;
+    }
+    @keyframes lightPulse { 0%,100%{opacity:.2; transform:scale(.9);} 50%{opacity:.85; transform:scale(1.15);} }
+
+    .manaAnim-B::before {
+      inset:-60%;
+      background: conic-gradient(from 0deg, transparent, rgba(120,60,170,.55), transparent 45%, rgba(80,30,120,.4), transparent 90%);
+      animation: voidSwirl 4s linear infinite;
+    }
+    @keyframes voidSwirl { from{transform:rotate(0deg);} to{transform:rotate(360deg);} }
   </style>
 </head>
 <body>
@@ -1377,22 +1432,45 @@
           const Ctx = window.AudioContext || window.webkitAudioContext;
           if (!Ctx) return;
           const ctx = new Ctx();
+          if (ctx.state === "suspended") ctx.resume();
           const primary = colors[0];
           const cfg = {
-            U: { type:"sine", f1:520, f2:180, dur:0.6 },     // "onda" discendente
-            G: { type:"triangle", f1:300, f2:340, dur:0.35 },
-            R: { type:"sawtooth", f1:220, f2:120, dur:0.3 },
-            W: { type:"sine", f1:660, f2:880, dur:0.4 },
-            B: { type:"square", f1:110, f2:80, dur:0.45 },
-          }[primary] || { type:"sine", f1:440, f2:440, dur:0.3 };
+            U: { type:"lowpass",  f1:1400, f2:250,  dur:0.9, gain:.20 }, // onda che si allontana
+            G: { type:"bandpass", f1:900,  f2:1600, dur:0.6, gain:.13 }, // fruscio di foglie/vento
+            R: { type:"highpass", f1:500,  f2:2600, dur:0.5, gain:.16 }, // crepitio del fuoco
+            W: { type:"highpass", f1:2200, f2:4200, dur:0.5, gain:.11 }, // scintillio
+            B: { type:"lowpass",  f1:350,  f2:50,   dur:0.7, gain:.18 }, // rimbombo cupo
+          }[primary] || { type:"lowpass", f1:900, f2:400, dur:0.5, gain:.14 };
+
+          // Rumore bianco filtrato: molto più credibile di un tono puro per acqua/vento/fuoco
+          const bufferSize = Math.floor(ctx.sampleRate * cfg.dur);
+          const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+          const data = buffer.getChannelData(0);
+          for (let i=0;i<bufferSize;i++) data[i] = Math.random()*2-1;
+          const noise = ctx.createBufferSource();
+          noise.buffer = buffer;
+
+          const filter = ctx.createBiquadFilter();
+          filter.type = cfg.type;
+          filter.frequency.setValueAtTime(cfg.f1, ctx.currentTime);
+          filter.frequency.exponentialRampToValueAtTime(Math.max(cfg.f2,40), ctx.currentTime+cfg.dur);
+
+          const noiseGain = ctx.createGain();
+          noiseGain.gain.setValueAtTime(cfg.gain, ctx.currentTime);
+          noiseGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+cfg.dur);
+
+          noise.connect(filter); filter.connect(noiseGain); noiseGain.connect(ctx.destination);
+          noise.start(); noise.stop(ctx.currentTime+cfg.dur);
+
+          // Un leggero tono sotto il rumore, per dare "corpo" senza farlo sembrare un beep
           const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = cfg.type;
-          osc.frequency.setValueAtTime(cfg.f1, ctx.currentTime);
-          osc.frequency.exponentialRampToValueAtTime(Math.max(cfg.f2,40), ctx.currentTime+cfg.dur);
-          gain.gain.setValueAtTime(0.12, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+cfg.dur);
-          osc.connect(gain); gain.connect(ctx.destination);
+          const oscGain = ctx.createGain();
+          osc.type = primary==="R" ? "sawtooth" : primary==="B" ? "square" : "sine";
+          osc.frequency.setValueAtTime(cfg.f1/4, ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(Math.max(cfg.f2/4,30), ctx.currentTime+cfg.dur);
+          oscGain.gain.setValueAtTime(cfg.gain*0.4, ctx.currentTime);
+          oscGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+cfg.dur);
+          osc.connect(oscGain); oscGain.connect(ctx.destination);
           osc.start(); osc.stop(ctx.currentTime+cfg.dur);
         } catch {}
       }
@@ -2905,7 +2983,7 @@
                     )}
                     <div style={{display:"flex",flexDirection:"column",gap:12}}>
                       {livePlayers.map(p => (
-                        <div key={p.id} style={{...S.panel,position:"relative",overflow:"hidden",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,
+                        <div key={p.id} className={p.manaColors?.length===1?`manaAnim-${p.manaColors[0]}`:""} style={{...S.panel,position:"relative",overflow:"hidden",border:"2px solid rgba(255,255,255,.14)",borderRadius:16,
                           ...(isPlayerKO(p)?{opacity:.5}:{}),
                           ...(manaThemeBackground(p.manaColors)
                             ? {background: manaThemeBackground(p.manaColors)}
@@ -3052,32 +3130,34 @@
                   const renderCell = (p, idx, cols, isTop) => {
                     const deg = cellRotation(idx, cols, isTop);
                     const manaBg = manaThemeBackground(p.manaColors);
+                    const themeClass = p.manaColors?.length===1 ? `manaAnim-${p.manaColors[0]}` : "";
                     return (
-                    <div key={p.id} style={{...S.tableCell, transform: `rotate(${deg}deg)`,
-                      ...(isPlayerKO(p)?{opacity:.45}:{}),
-                      ...(manaBg ? { background: manaBg } :
-                        colorizePanels ? { background: colorIdentityBg(p) } :
-                        p.bgImage ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.7:.5}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"} :
-                        p.customColor ? {background:p.customColor} : {})}}>
-                      {manaBg && p.pulseAt>0 && (
-                        <div key={p.pulseAt} style={S.manaPulse}></div>
-                      )}
-                      {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
-                      <div style={{fontWeight:700,fontSize:14,marginBottom:2,color:colorizePanels?"#0a0a0f":"#f8fafc",cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted"}}
-                        onClick={()=>{setPlayerPopupFor(p.id);setPlayerPopupTab("giocatore");}}>{p.name}</div>
-                      {p.deckName && <div style={{fontSize:10,marginBottom:6,color:colorizePanels?"#2a2a2a":"#94a3b8"}}>{p.deckName}</div>}
-                      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-                        <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−</button>
-                        <div style={{fontSize:36,fontWeight:800,minWidth:60,textAlign:"center",color:colorizePanels?"#0a0a0f":(p.life<=10?"#f87171":"#f8fafc")}}>{p.life}</div>
-                        <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+</button>
-                      </div>
-                      {trackPoison && (
-                        <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11}}>
-                          <span style={{color:"#166534"}}>☠️ {p.poison}</span>
-                          <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
-                          <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
+                    <div key={p.id} style={{...S.tableCell, ...(isPlayerKO(p)?{opacity:.45}:{})}}>
+                      <div className={themeClass} style={{...S.tableCellInner, transform: `rotate(${deg}deg)`,
+                        ...(manaBg ? { background: manaBg } :
+                          colorizePanels ? { background: colorIdentityBg(p) } :
+                          p.bgImage ? {backgroundImage:`linear-gradient(rgba(10,10,15,${p.highContrast?.7:.5}),rgba(10,10,15,${p.highContrast?.9:.8})), url(${p.bgImage})`,backgroundSize:"cover",backgroundPosition:"center"} :
+                          p.customColor ? {background:p.customColor} : {})}}>
+                        {manaBg && p.pulseAt>0 && (
+                          <div key={p.pulseAt} style={S.manaPulse}></div>
+                        )}
+                        {isPlayerKO(p) && <div style={S.koBadge}>☠️ ELIMINATO</div>}
+                        <div style={{fontWeight:700,fontSize:14,marginBottom:2,color:colorizePanels?"#0a0a0f":"#f8fafc",cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted"}}
+                          onClick={()=>{setPlayerPopupFor(p.id);setPlayerPopupTab("giocatore");}}>{p.name}</div>
+                        {p.deckName && <div style={{fontSize:10,marginBottom:6,color:colorizePanels?"#2a2a2a":"#94a3b8"}}>{p.deckName}</div>}
+                        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                          <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,-1)}>−</button>
+                          <div style={{fontSize:36,fontWeight:800,minWidth:60,textAlign:"center",color:colorizePanels?"#0a0a0f":(p.life<=10?"#f87171":"#f8fafc")}}>{p.life}</div>
+                          <button style={S.lifeBtn} onClick={()=>adjustLife(p.id,1)}>+</button>
                         </div>
-                      )}
+                        {trackPoison && (
+                          <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11}}>
+                            <span style={{color:"#166534"}}>☠️ {p.poison}</span>
+                            <button style={S.btnMini} onClick={()=>adjustPoison(p.id,-1)}>−</button>
+                            <button style={S.btnMini} onClick={()=>adjustPoison(p.id,1)}>+</button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   );};
                   return (
@@ -3586,7 +3666,8 @@
       lifeBtn:{width:44,height:44,borderRadius:"50%",background:"#1e1b2e",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:15,fontWeight:700,cursor:"pointer"},
       tableModeWrap:{position:"fixed",inset:0,background:"#0a0a0f",zIndex:500,display:"flex",flexDirection:"column"},
       tableHalf:{flex:1,display:"grid",gap:1,minHeight:0},
-      tableCell:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#12101a",border:"1px solid rgba(255,255,255,.08)",padding:10,overflow:"hidden",position:"relative"},
+      tableCell:{background:"#12101a",border:"1px solid rgba(255,255,255,.08)",overflow:"hidden",position:"relative"},
+      tableCellInner:{position:"absolute",top:"-100%",left:"-100%",width:"300%",height:"300%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:10},
       tableBgBtn:{position:"absolute",top:6,right:6,width:26,height:26,borderRadius:"50%",background:"rgba(10,10,15,.7)",border:"1px solid #2d2b3e",color:"#f8fafc",fontSize:12,cursor:"pointer"},
       koBadge:{position:"absolute",top:8,left:"50%",transform:"translateX(-50%)",background:"#7f1d1d",color:"#fca5a5",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:12,zIndex:2},
       manaPulse:{position:"absolute",inset:0,background:"rgba(255,255,255,.35)",animation:"manaPulseFade .7s ease-out forwards",pointerEvents:"none",zIndex:1},
