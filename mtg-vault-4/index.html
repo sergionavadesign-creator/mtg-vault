@@ -961,6 +961,7 @@
       const [advisorDeck, setAdvisorDeck] = useState("");
       const [budget, setBudget] = useState(50);
       const [advisorResult, setAdvisorResult] = useState(null);
+      const [advisorSwaps, setAdvisorSwaps] = useState(null);
       const [advising, setAdvising] = useState(false);
       const [advisorMode, setAdvisorMode] = useState("analyze"); // analyze | build
       const [deckStyle, setDeckStyle] = useState("aggressivo");
@@ -1430,8 +1431,8 @@
 
       async function runAdvisor() {
         if (!advisorDeck) return;
-        const deck = data.decks.find(d => d.id===parseInt(advisorDeck)); if (!deck) return;
-        setAdvising(true); setAdvisorResult(null);
+        const deck = data.decks.find(d => d.id===advisorDeck); if (!deck) return;
+        setAdvising(true); setAdvisorResult(null); setAdvisorSwaps(null);
         const summary = deck.cards.map(c => `${c.qty||1}x ${c.name} (${c.type}, ${c.manaCost})`).join("\n");
         const prompt = "Sei un esperto di Magic: The Gathering. Analizza questo mazzo in formato "+deck.format+" e suggerisci miglioramenti concreti.\n\n"+
           "IMPORTANTE: rispondi in modo diretto e conciso, senza commenti introduttivi o premesse. Vai dritto alla sezione **Analisi del mazzo**.\n\n"+
@@ -1439,16 +1440,53 @@
           "BUDGET MASSIMO: €"+budget+"\n\n"+
           "Rispondi in italiano, in modo sintetico, con ESATTAMENTE questa struttura:\n"+
           "**Analisi del mazzo**\n(massimo 3 righe: punti di forza e debolezze)\n\n"+
-          "**Carte da rimuovere**\n- Nome carta — motivazione breve\n\n"+
-          "**Carte da aggiungere**\n- Nome carta — €X stimato — link Cardmarket\n\n"+
+          "**Sostituzioni consigliate**\n"+
+          "(per ogni miglioramento, abbina SEMPRE la carta da togliere a quella specifica da aggiungere al suo posto, una riga per sostituzione, in questo formato esatto:\n"+
+          "Rimuovi: Nome Carta Attuale | Aggiungi: Nome Carta Nuova | €X stimato | motivazione breve del perché è un upgrade\n"+
+          "Usa il carattere | come separatore esattamente come mostrato. Non superare il budget totale sommando tutte le carte da aggiungere.)\n\n"+
           "**Strategia consigliata**\n(massimo 2-3 righe)\n\n"+
-          "Budget rigoroso: €"+budget+". Solo carte legali in "+deck.format+".";
+          "Budget rigoroso: €"+budget+" in totale per tutte le sostituzioni insieme. Solo carte legali in "+deck.format+".";
 
         try {
           const text = await callAiProxy(prompt);
           setAdvisorResult(text || "Nessuna risposta.");
+          if (text) await loadAdvisorSwaps(text);
         } catch (e) { setAdvisorResult(e.message || "Errore di connessione. Riprova."); }
         setAdvising(false);
+      }
+
+      // Estrae le righe "Rimuovi: X | Aggiungi: Y | €Z | motivo" e recupera le immagini da Scryfall
+      // per mostrare le due carte affiancate invece di un semplice elenco testuale
+      async function loadAdvisorSwaps(text) {
+        const section = extractAiSection(text, "Sostituzioni consigliate");
+        const rows = section.split("\n").map(l=>l.trim()).filter(l=>l.toLowerCase().startsWith("rimuovi"));
+        const swaps = rows.map(l => {
+          const parts = l.split("|").map(p=>p.trim());
+          const removeName = (parts[0]||"").replace(/^rimuovi:?\s*/i,"").trim();
+          const addName = (parts[1]||"").replace(/^aggiungi:?\s*/i,"").trim();
+          const price = parts[2]||"";
+          const reason = parts[3]||"";
+          return { removeName, addName, price, reason };
+        }).filter(s=>s.removeName && s.addName);
+        if (swaps.length===0) { setAdvisorSwaps(null); return; }
+
+        const names = [...new Set(swaps.flatMap(s=>[s.removeName,s.addName]))];
+        const identifiers = names.map(n=>({name:n}));
+        const chunks = []; for (let i=0;i<identifiers.length;i+=75) chunks.push(identifiers.slice(i,i+75));
+        const scryMap = {};
+        for (const chunk of chunks) {
+          try {
+            const res = await fetch("https://api.scryfall.com/cards/collection", {
+              method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers: chunk })
+            });
+            if (res.ok) { const dd = await res.json(); (dd.data||[]).forEach(c=>{ scryMap[c.name.toLowerCase()] = c; }); }
+          } catch {}
+        }
+        setAdvisorSwaps(swaps.map(s => ({
+          ...s,
+          removeImg: cardArtCrop(scryMap[s.removeName.toLowerCase()])||cardImage(scryMap[s.removeName.toLowerCase()]),
+          addImg: cardArtCrop(scryMap[s.addName.toLowerCase()])||cardImage(scryMap[s.addName.toLowerCase()]),
+        })));
       }
 
       // Spiega carta in italiano
@@ -1963,6 +2001,8 @@
 
       function renderAdvisor(text) {
         return text.split("\n").map((line, i) => {
+          if (line.toLowerCase().startsWith("rimuovi:")) return null; // mostrate visualmente altrove
+          if (line.replace(/\*\*/g,"").trim().toLowerCase()==="sostituzioni consigliate") return null; // sostituito dal widget visivo
           if (line.startsWith("**") && line.endsWith("**"))
             return <div key={i} style={S.aH2}>{line.replace(/\*\*/g,"")}</div>;
           if (line.match(/^[-•]\s/)) {
@@ -1972,6 +2012,31 @@
           }
           return line.trim() ? <p key={i} style={S.aP}>{line}</p> : <br key={i}/>;
         });
+      }
+
+      // Riquadro visivo con le due carte affiancate per ogni sostituzione consigliata
+      function renderAdvisorSwaps(swaps) {
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:14}}>
+            {swaps.map((s,i) => (
+              <div key={i} style={S.swapCard}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{flex:1,textAlign:"center"}}>
+                    {s.removeImg ? <img src={s.removeImg} alt={s.removeName} style={S.swapImg}/> : <div style={S.swapImgPlaceholder}>🃏</div>}
+                    <div style={{fontSize:11,color:"#f87171",marginTop:4}}>✕ {s.removeName}</div>
+                  </div>
+                  <div style={{fontSize:20,color:"#64748b"}}>→</div>
+                  <div style={{flex:1,textAlign:"center"}}>
+                    {s.addImg ? <img src={s.addImg} alt={s.addName} style={S.swapImg}/> : <div style={S.swapImgPlaceholder}>🃏</div>}
+                    <div style={{fontSize:11,color:"#34d399",marginTop:4}}>✓ {s.addName}</div>
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:"#f59e0b",fontWeight:700,marginTop:8,textAlign:"center"}}>{s.price}</div>
+                {s.reason && <div style={{fontSize:11,color:"#94a3b8",marginTop:4,textAlign:"center"}}>{s.reason}</div>}
+              </div>
+            ))}
+          </div>
+        );
       }
 
       // ── PROFILE SCREEN ──
@@ -3258,6 +3323,12 @@
                     {advisorResult && (
                       <div style={{...S.panel,borderColor:"#1a3a2a"}} className="fade-in">
                         <div style={{fontSize:13,fontWeight:700,color:"#34d399",marginBottom:14}}>📋 Analisi completata</div>
+                        {advisorSwaps && advisorSwaps.length>0 && (
+                          <>
+                            <div style={S.aH2}>Sostituzioni consigliate</div>
+                            {renderAdvisorSwaps(advisorSwaps)}
+                          </>
+                        )}
                         {renderAdvisor(advisorResult)}
                       </div>
                     )}
@@ -3507,6 +3578,9 @@
       qtyCnt:{fontSize:13,fontWeight:700,minWidth:20,textAlign:"center"},
       // Advisor
       aH2:{fontSize:13,fontWeight:700,color:"#f59e0b",margin:"12px 0 5px"},
+      swapCard:{background:"#0e0c16",border:"1px solid #1e1b2e",borderRadius:10,padding:12},
+      swapImg:{width:"100%",maxWidth:110,borderRadius:8,aspectRatio:"5/4",objectFit:"cover"},
+      swapImgPlaceholder:{width:"100%",maxWidth:110,aspectRatio:"5/4",background:"#1e1b2e",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,margin:"0 auto"},
       aLi:{fontSize:12,color:"#cbd5e1",padding:"3px 0 3px 10px",borderLeft:"2px solid #1e3a2e",margin:"3px 0"},
       aP:{fontSize:12,color:"#94a3b8",lineHeight:1.6,margin:"3px 0"},
     };
