@@ -1960,11 +1960,17 @@
         let missed = [];
 
         if (buildSource==="collection") {
+          const ownedByNameColl = {};
+          collection.forEach(oc => {
+            const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
+            keys.forEach(key => { ownedByNameColl[key] = (ownedByNameColl[key]||0) + (oc.qty||1); });
+          });
           lines.forEach(({qty,name}) => {
             const match = collection.find(c =>
               c.name.toLowerCase()===name.toLowerCase() || (c.printed_name||"").toLowerCase()===name.toLowerCase());
             if (!match) { missed.push(name); return; }
-            cardsOut.push({ ...match, id: crypto.randomUUID(), qty, isCommander: commanderName && match.name.toLowerCase()===commanderName.toLowerCase() });
+            const ownedQty = ownedByNameColl[canonicalCardName(match.name)] || 0;
+            cardsOut.push({ ...match, id: crypto.randomUUID(), qty, owned: ownedQty >= qty, ownedQty, isCommander: commanderName && match.name.toLowerCase()===commanderName.toLowerCase() });
           });
         } else {
           // Modalità "tutte le carte": recupera i dati completi da Scryfall e traccia cosa possiedi già
