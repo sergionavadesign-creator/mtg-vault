@@ -619,7 +619,7 @@
             {results.length>0 && (
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"10px 0 4px"}}>
                 <span style={{fontSize:12, color:"#34d399", fontWeight:600}}>{status}</span>
-                {results.length>6 && (
+                {results.length>0 && (
                   <button style={S.filterBtn} onClick={()=>setShowFilters(true)}>
                     ⚙️ Filtri{(filterYear!=="All"||filterLang!=="All"||filterSet!=="All"||hideCrossover) && <span style={S.filterBadge}>●</span>}
                   </button>
@@ -668,14 +668,28 @@
             })()}
 
             {/* Lista risultati */}
-            {results.length>0 && (
+            {results.length>0 && (() => {
+              const filteredResults = results
+                .filter(card => filterYear==="All" || card.released_at?.slice(0,4)===filterYear)
+                .filter(card => filterLang==="All" || card.lang===filterLang)
+                .filter(card => filterSet==="All" || card.set_name===filterSet)
+                .filter(card => !hideCrossover || !CROSSOVER_KEYWORDS.some(k => (card.set_name||"").toLowerCase().includes(k)));
+              if (filteredResults.length===0) {
+                return (
+                  <div style={{textAlign:"center",padding:"20px 10px",background:"#1e1b2e",borderRadius:8,marginTop:8}}>
+                    <div style={{fontSize:12,color:"#94a3b8",marginBottom:10}}>
+                      {results.length} edizioni trovate, ma i filtri attivi le nascondono tutte
+                      {hideCrossover && ' (probabilmente esistono solo in set crossover come Marvel/Avatar/TMNT)'}.
+                    </div>
+                    {hideCrossover && (
+                      <button style={S.btnP} onClick={()=>setHideCrossover(false)}>Mostra anche i set crossover</button>
+                    )}
+                  </div>
+                );
+              }
+              return (
               <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:8}}>
-                {results
-                  .filter(card => filterYear==="All" || card.released_at?.slice(0,4)===filterYear)
-                  .filter(card => filterLang==="All" || card.lang===filterLang)
-                  .filter(card => filterSet==="All" || card.set_name===filterSet)
-                  .filter(card => !hideCrossover || !CROSSOVER_KEYWORDS.some(k => (card.set_name||"").toLowerCase().includes(k)))
-                  .map(card => {
+                {filteredResults.map(card => {
                   const year = card.released_at ? card.released_at.slice(0,4) : "";
                   const langFlag = {en:"🇬🇧",it:"🇮🇹",fr:"🇫🇷",de:"🇩🇪",es:"🇪🇸",pt:"🇵🇹",ja:"🇯🇵",ko:"🇰🇷",ru:"🇷🇺",zhs:"🇨🇳",zht:"🇨🇳"}[card.lang] || card.lang?.toUpperCase() || "";
                   return (
@@ -701,7 +715,8 @@
                   );
                 })}
               </div>
-            )}
+              );
+            })()}
 
             {/* Status errore */}
             {results.length===0 && status && !scanning && (
@@ -1648,56 +1663,43 @@
 
       async function findSimilarCards() {
         if (!findCardRef) return;
-        setFindLoading(true); setFindResults(null);
+        setFindLoading(true); setFindResults(null); setFindQuery(null);
         const c = findCardRef;
-        const prompt = "Sei un esperto di Magic: The Gathering.\n\n"+
-          "IMPORTANTE: rispondi in modo diretto, senza premesse o commenti.\n\n"+
+        const prompt = "Sei un esperto di Magic: The Gathering e conosci bene la sintassi di ricerca di Scryfall (type:, cmc, o:, keyword:, c:, ecc.).\n\n"+
           "CARTA DI RIFERIMENTO:\n"+
           "Nome: "+c.name+"\nTipo: "+(c.type||"")+"\nCosto: "+(c.manaCost||"N/A")+"\n"+
           (c.oracleText ? "Testo: "+c.oracleText+"\n" : "")+"\n"+
-          "Trova 8-10 carte DIVERSE (nomi diversi dalla carta di riferimento, non ristampe della stessa carta) che siano funzionalmente simili — stesso ruolo, effetto o archetipo — ed eventuali alternative intercambiabili.\n\n"+
-          "Rispondi in italiano con ESATTAMENTE questa struttura:\n"+
-          "**Carte simili**\n"+
-          "(una riga per carta, formato: Nome Carta in inglese — breve motivo della somiglianza)\n";
+          "Scrivi UNA SOLA query di ricerca Scryfall che trovi TUTTE le carte funzionalmente simili a questa in tutto il database Magic — stesso ruolo, effetto o archetipo (non ristampe della stessa carta, quelle le escludo io separatamente).\n\n"+
+          "Esempio di formato valido: type:instant o:\"draw a card\" cmc<=2\n\n"+
+          "Rispondi SOLO con la query di ricerca, una riga, senza spiegazioni, senza virgolette attorno a tutta la query, senza altro testo.";
         try {
-          const text = await callAiProxy(prompt);
-          const section = extractAiSection(text, "Carte simili");
-          const lines = section.split("\n").map(l=>l.trim()).filter(Boolean)
-            .map(l => {
-              const m = l.match(/^-?\s*(.+?)\s*[—–-]\s*(.+)$/);
-              if (!m) return null;
-              return { name: m[1].replace(/^\d+\.\s*/,"").trim(), reason: m[2].trim() };
-            }).filter(Boolean);
-          const refCanonical = canonicalCardName(c.name);
-          const filtered = excludeSameName ? lines.filter(l => canonicalCardName(l.name)!==refCanonical) : lines;
-          if (filtered.length===0) { setFindResults([]); setFindLoading(false); return; }
+          const rawQuery = (await callAiProxy(prompt)).trim().replace(/^["']|["']$/g,"");
+          if (!rawQuery) { setFindResults([]); setFindLoading(false); return; }
 
-          const identifiers = filtered.map(l=>({name:l.name}));
-          const chunks = []; for (let i=0;i<identifiers.length;i+=75) chunks.push(identifiers.slice(i,i+75));
-          const scryMap = {};
-          for (const chunk of chunks) {
-            try {
-              const res = await fetch("https://api.scryfall.com/cards/collection", {
-                method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers: chunk })
-              });
-              if (res.ok) { const dd = await res.json(); (dd.data||[]).forEach(sc => { scryMap[sc.name.toLowerCase()] = sc; }); }
-            } catch {}
+          const refCanonical = canonicalCardName(c.name);
+          // Escludiamo la carta di riferimento stessa direttamente nella query, alla fonte
+          const fullQuery = excludeSameName ? `(${rawQuery}) -!"${c.name}"` : rawQuery;
+          setFindQuery(rawQuery);
+
+          const res = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(fullQuery)}&unique=cards&order=edhrec`);
+          if (!res.ok) {
+            const errData = await res.json().catch(()=>({}));
+            throw new Error("La query generata dall'IA non è valida per Scryfall: " + (errData.details || rawQuery));
           }
+          const data = await res.json();
+          let cards = (data.data || []).slice(0, 40);
+          if (excludeSameName) cards = cards.filter(sc => canonicalCardName(sc.name)!==refCanonical);
+
           const ownedByName = {};
           collection.forEach(oc => {
             const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
             keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
           });
-          const results = filtered.map(l => {
-            const sc = scryMap[l.name.toLowerCase()];
-            if (excludeSameName && sc && canonicalCardName(sc.name)===refCanonical) return null; // ristampa mascherata da nome diverso
-            return {
-              name: sc?.name || l.name, reason: l.reason,
-              image: sc ? cardImage(sc) : null, prices: sc?.prices || {},
-              owned: sc ? (ownedByName[canonicalCardName(sc.name)]||0) > 0 : false,
-              scryfallId: sc?.id || null, type: sc?.type_line || "", manaCost: sc?.mana_cost || ""
-            };
-          }).filter(Boolean);
+          const results = cards.map(sc => ({
+            name: sc.name, image: cardImage(sc), prices: sc.prices || {},
+            owned: (ownedByName[canonicalCardName(sc.name)]||0) > 0,
+            scryfallId: sc.id, type: sc.type_line || "", manaCost: sc.mana_cost || ""
+          }));
           setFindResults(results);
         } catch (e) {
           setFindResults(null);
