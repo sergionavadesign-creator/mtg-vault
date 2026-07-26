@@ -1138,6 +1138,11 @@
       const [priceCard, setPriceCard] = useState(null);
       const [deckCardPopup, setDeckCardPopup] = useState(null);
       const [showSaveDeckPopup, setShowSaveDeckPopup] = useState(false);
+      const [showTextImport, setShowTextImport] = useState(false);
+      const [textImportRaw, setTextImportRaw] = useState("");
+      const [textImportName, setTextImportName] = useState("");
+      const [textImportFormat, setTextImportFormat] = useState("Commander");
+      const [textImportLoading, setTextImportLoading] = useState(false);
       const [saveDeckName, setSaveDeckName] = useState("");
       const [savingAiDeck, setSavingAiDeck] = useState(false);
       const [priceInfo, setPriceInfo] = useState(null);
@@ -1931,6 +1936,121 @@
         return issues;
       }
 
+      // Interpreta un mazzo incollato come semplice testo (formati comuni: "1x Nome", "1 Nome",
+      // "Nome" senza numero = 1 copia, righe di sezione "Commander"/"Deck"/"Sideboard", righe SB:,
+      // codici set/numero collezionista tra parentesi che vengono ripuliti automaticamente)
+      function parseDecklistText(raw) {
+        const lines = raw.split("\n").map(l=>l.trim());
+        let section = "deck";
+        const entries = [];
+        for (let line of lines) {
+          if (!line) continue;
+          if (/^\/\//.test(line) || /^#/.test(line)) continue;
+          const header = line.match(/^(commander|deck|mainboard|main|sideboard|maybeboard)\s*:?\s*$/i);
+          if (header) {
+            const h = header[1].toLowerCase();
+            section = h==="commander" ? "commander" : h==="sideboard"||h==="maybeboard" ? "sideboard" : "deck";
+            continue;
+          }
+          let working = line;
+          let forcedSection = null;
+          const sbPrefix = working.match(/^SB:?\s+(.*)$/i);
+          if (sbPrefix) { working = sbPrefix[1]; forcedSection = "sideboard"; }
+          let qty = 1, name = working;
+          const qm = working.match(/^(\d+)\s*x?\s+(.+)$/i);
+          if (qm) { qty = parseInt(qm[1]); name = qm[2]; }
+          name = name.replace(/\s*\([A-Za-z0-9]{2,6}\)\s*#?\d*\s*$/,"").trim(); // rimuove (SET) 123 finale
+          name = name.replace(/\s*\*F\*\s*$/i,"").trim(); // rimuove marcatore foil tipo "*F*"
+          if (!name) continue;
+          entries.push({ qty, name, section: forcedSection || section });
+        }
+        return entries;
+      }
+
+      async function importDeckFromText() {
+        const entries = parseDecklistText(textImportRaw);
+        if (entries.length===0) { alert("Non ho trovato nessuna carta da importare — controlla il testo incollato."); return; }
+        setTextImportLoading(true);
+        try {
+          const deckEntries = entries.filter(e=>e.section!=="sideboard");
+          const sideboardEntries = entries.filter(e=>e.section==="sideboard");
+          const commanderEntries = entries.filter(e=>e.section==="commander");
+
+          const allNames = [...new Set(entries.map(e=>e.name))];
+          const identifiers = allNames.map(n=>({name:n}));
+          const chunks = []; for (let i=0;i<identifiers.length;i+=75) chunks.push(identifiers.slice(i,i+75));
+          const scryMap = {};
+          for (const chunk of chunks) {
+            try {
+              const res = await fetch("https://api.scryfall.com/cards/collection", {
+                method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers: chunk })
+              });
+              if (res.ok) { const dd = await res.json(); (dd.data||[]).forEach(sc => { scryMap[sc.name.toLowerCase()] = sc; }); }
+            } catch {}
+          }
+          // Ricerca fuzzy per i nomi non trovati esattamente (typo, formattazione leggermente diversa)
+          const stillMissing = allNames.filter(n => !scryMap[n.toLowerCase()]);
+          for (const n of stillMissing) {
+            try {
+              const r = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(n)}`);
+              if (r.ok) { const sc = await r.json(); if (sc?.name) scryMap[n.toLowerCase()] = sc; }
+            } catch {}
+          }
+
+          const ownedByName = {};
+          collection.forEach(oc => {
+            const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
+            keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
+          });
+
+          const missed = [];
+          function buildCard(entry, isCommander, isSideboard) {
+            const sc = scryMap[entry.name.toLowerCase()];
+            if (!sc) { missed.push(entry.name); return null; }
+            const ownedQty = ownedByName[canonicalCardName(sc.name)] || 0;
+            return {
+              id: crypto.randomUUID(), scryfallId: sc.id, name: sc.name, printed_name: sc.printed_name||null,
+              set: sc.set_name, setCode: sc.set, collectorNumber: sc.collector_number,
+              rarity: sc.rarity, manaCost: sc.mana_cost||sc.card_faces?.[0]?.mana_cost||"",
+              colors: (sc.colors?.length?sc.colors:sc.card_faces?.[0]?.colors)||[], colorIdentity: sc.color_identity||[],
+              oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
+              type: sc.type_line||"", legalities: sc.legalities||{}, prices: sc.prices||{},
+              image: cardImage(sc), artCrop: cardArtCrop(sc),
+              qty: entry.qty, owned: ownedQty>=entry.qty, ownedQty, imported: true,
+              isCommander: !!isCommander, isSideboard: !!isSideboard
+            };
+          }
+
+          let cardsOut = deckEntries.map(e => buildCard(e, false, false)).filter(Boolean);
+          const sideboardOut = sideboardEntries.map(e => buildCard(e, false, true)).filter(Boolean);
+          let commanderOut = commanderEntries.map(e => buildCard(e, true, false)).filter(Boolean);
+
+          // Se non c'era una sezione "Commander" esplicita ma il formato è Commander, prova a
+          // riconoscere il comandante tra le carte già importate (prima creatura leggendaria idonea)
+          if (textImportFormat==="Commander" && commanderOut.length===0) {
+            const fallback = cardsOut.find(c=>canBeCommander(c));
+            if (fallback) { fallback.isCommander = true; commanderOut = [fallback]; cardsOut = cardsOut.filter(c=>c!==fallback); }
+          }
+
+          const finalCards = [...commanderOut, ...cardsOut, ...sideboardOut];
+          if (finalCards.length===0) {
+            alert("Nessuna carta è stata riconosciuta su Scryfall. Controlla i nomi nel testo incollato.");
+            setTextImportLoading(false); return;
+          }
+
+          const deck = { id: crypto.randomUUID(), name: textImportName.trim()||"Mazzo importato", format: textImportFormat,
+            cards: finalCards, ownerId: activeProfileId, isImported: true, folder: activeFolder||"" };
+          await saveDeck(deck);
+          persist({ ...data, decks: [...data.decks, deck] });
+          setShowTextImport(false); setTextImportRaw(""); setTextImportName(""); setTextImportLoading(false);
+          setTab("decks"); setActiveDeck(deck.id); setDeckView("build");
+          if (missed.length) alert(`Mazzo importato, ma queste carte non sono state trovate su Scryfall: ${missed.join(", ")}`);
+        } catch (e) {
+          alert("Errore durante l'importazione: " + (e.message||"riprova"));
+          setTextImportLoading(false);
+        }
+      }
+
       async function saveAiDeckAsReal() {
         setSavingAiDeck(true);
         const section = extractAiSection(buildResult, "Lista mazzo");
@@ -2038,11 +2158,91 @@
           const fallback = cardsOut.find(c=>canBeCommander(c));
           if (fallback) fallback.isCommander = true;
         }
+
+        // Rete di sicurezza deterministica: se nonostante tutto restano carte fuori identità
+        // cromatica del comandante, le rimuovo con dati REALI di Scryfall (non a discrezione
+        // dell'IA). Per ognuna cerco prima una carta sostitutiva vera, dello stesso tipo e
+        // costo simile, on-color — una terra base è solo l'ultima spiaggia se non trovo nulla,
+        // per non riempire il mazzo di terre quando le violazioni sono tante.
+        let colorFixInfo = null;
+        if (buildFormat==="Commander") {
+          const commander = cardsOut.find(c=>c.isCommander);
+          if (commander) {
+            const identity = new Set(commander.colorIdentity?.length ? commander.colorIdentity : (commander.colors||[]));
+            const isLand = c => (c.type||"").toLowerCase().includes("land");
+            const offenders = cardsOut.filter(c => c!==commander && !isLand(c) && (c.colorIdentity||[]).some(col=>!identity.has(col)));
+            if (identity.size > 0 && offenders.length > 0) {
+              const offenderIds = new Set(offenders.map(c=>c.id));
+              cardsOut = cardsOut.filter(c => !offenderIds.has(c.id));
+              const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
+              const identityArr = [...identity];
+              const idQuery = identityArr.length ? identityArr.join("") : "c";
+              const usedNames = new Set(cardsOut.map(c=>canonicalCardName(c.name)));
+              const substituted = [], landed = [];
+
+              for (const offender of offenders) {
+                let replaced = false;
+                const t = (offender.type||"").toLowerCase();
+                let primaryType = t.includes("creature") ? "creature" : t.includes("instant") ? "instant"
+                  : t.includes("sorcery") ? "sorcery" : t.includes("artifact") ? "artifact"
+                  : t.includes("enchantment") ? "enchantment" : t.includes("planeswalker") ? "planeswalker" : null;
+                if (primaryType) {
+                  const cmc = computeCmc(offender.manaCost);
+                  const query = `type:${primaryType} identity<=${idQuery} cmc>=${Math.max(0,cmc-1)} cmc<=${cmc+1} -type:land`;
+                  try {
+                    const r = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=edhrec&unique=cards`);
+                    if (r.ok) {
+                      const d = await r.json();
+                      const pick = (d.data||[]).find(sc => !usedNames.has(canonicalCardName(sc.name)));
+                      if (pick) {
+                        usedNames.add(canonicalCardName(pick.name));
+                        cardsOut.push({
+                          id: crypto.randomUUID(), scryfallId: pick.id, name: pick.name, printed_name: pick.printed_name||null,
+                          set: pick.set_name, setCode: pick.set, collectorNumber: pick.collector_number,
+                          rarity: pick.rarity, manaCost: pick.mana_cost||pick.card_faces?.[0]?.mana_cost||"",
+                          colors: (pick.colors?.length?pick.colors:pick.card_faces?.[0]?.colors)||[], colorIdentity: pick.color_identity||[],
+                          oracleText: pick.oracle_text||pick.card_faces?.[0]?.oracle_text||"",
+                          type: pick.type_line||"", legalities: pick.legalities||{}, prices: pick.prices||{},
+                          image: cardImage(pick), artCrop: cardArtCrop(pick), qty: offender.qty||1,
+                          owned: false, ownedQty: 0, imported: true, isCommander: false
+                        });
+                        substituted.push({ from: offender.printed_name||offender.name, to: pick.name });
+                        replaced = true;
+                      }
+                    }
+                  } catch {}
+                }
+                if (!replaced) {
+                  const color = identityArr[landed.length % (identityArr.length||1)];
+                  const landName = BASIC_LAND_BY_COLOR[color] || "Wastes";
+                  const existingLand = cardsOut.find(c => canonicalCardName(c.name)===landName.toLowerCase());
+                  if (existingLand) existingLand.qty = (existingLand.qty||1) + (offender.qty||1);
+                  else cardsOut.push({
+                    id: crypto.randomUUID(), scryfallId:null, name:landName, printed_name:null,
+                    set:"", setCode:"", collectorNumber:"", rarity:"common", manaCost:"",
+                    colors:[], colorIdentity: color?[color]:[], oracleText:"", type:"Basic Land — "+landName,
+                    legalities:{}, prices:{}, image:null, artCrop:null, qty:offender.qty||1, owned:true, ownedQty:999,
+                    imported:true, isCommander:false
+                  });
+                  landed.push(offender.printed_name||offender.name);
+                }
+              }
+              colorFixInfo = { removed: offenders.map(c=>c.printed_name||c.name), substituted, landedCount: landed.length };
+            }
+          }
+        }
+
         const deck = { id: crypto.randomUUID(), name: saveDeckName.trim()||"Mazzo AI", format: buildFormat, cards: cardsOut, ownerId: activeProfileId, isImported: buildSource==="all", folder: activeFolder||"" };
         await saveDeck(deck);
         persist({ ...data, decks: [...data.decks, deck] });
         setShowSaveDeckPopup(false); setSaveDeckName(""); setSavingAiDeck(false);
         setTab("decks"); setActiveDeck(deck.id); setDeckView("build");
+        if (colorFixInfo) {
+          let msg = `L'IA aveva incluso ${colorFixInfo.removed.length} carte fuori dall'identità cromatica del comandante: ${colorFixInfo.removed.join(", ")}.\n\n`;
+          if (colorFixInfo.substituted.length) msg += `Sostituite con carte on-color equivalenti: ${colorFixInfo.substituted.map(s=>`${s.from} → ${s.to}`).join(", ")}.\n\n`;
+          if (colorFixInfo.landedCount) msg += `Per ${colorFixInfo.landedCount} non ho trovato un'alternativa adatta e ho aggiunto terre base al loro posto.`;
+          alert(msg);
+        }
         if (missed.length) alert(`Il mazzo è stato creato, ma queste carte suggerite dall'IA non sono state trovate: ${missed.join(", ")}`);
       }
 
@@ -2462,6 +2662,33 @@
               </div>
             </div>
           )}
+          {showTextImport && (
+            <div style={S.modalOverlay} onClick={()=>{if(!textImportLoading)setShowTextImport(false);}}>
+              <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>📋 Crea mazzo da lista testo</span>
+                  <button style={S.btnGhost} onClick={()=>setShowTextImport(false)}>✕</button>
+                </div>
+                <label style={S.lbl}>Nome del mazzo</label>
+                <input style={{...S.inp,width:"100%",marginBottom:14}} placeholder="Es. Mazzo di carta e penna"
+                  value={textImportName} onChange={e=>setTextImportName(e.target.value)} />
+                <label style={S.lbl}>Formato</label>
+                <select style={{...S.sel,width:"100%",marginBottom:14}} value={textImportFormat} onChange={e=>setTextImportFormat(e.target.value)}>
+                  {FORMATS.map(f=><option key={f}>{f}</option>)}
+                </select>
+                <label style={S.lbl}>Lista carte (una per riga)</label>
+                <textarea style={{...S.inp,width:"100%",minHeight:180,resize:"vertical",fontFamily:"monospace",fontSize:12,marginBottom:8}}
+                  placeholder={"1x Sol Ring\n1x Command Tower\nSwords to Plowshares\n\nCommander\n1x Atraxa, Praetors' Voice"}
+                  value={textImportRaw} onChange={e=>setTextImportRaw(e.target.value)} />
+                <div style={{fontSize:11,color:"#64748b",marginBottom:16}}>
+                  Riconosco formati come "1x Nome", "1 Nome" o solo "Nome" (1 copia). Una riga con scritto "Commander" da sola indica che le carte sotto sono il comandante; "Sideboard" allo stesso modo per la riserva. Ogni carta viene confrontata con la tua collezione.
+                </div>
+                <button style={{...S.btnP,width:"100%",padding:13}} onClick={importDeckFromText} disabled={textImportLoading || !textImportRaw.trim()}>
+                  {textImportLoading ? "⏳ Importo…" : "✅ Crea il mazzo"}
+                </button>
+              </div>
+            </div>
+          )}
           {deckCardPopup && (
             <div style={S.modalOverlay} onClick={()=>setDeckCardPopup(null)}>
               <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -2781,6 +3008,14 @@
                           </div>
                         </div>
                       )}
+                    </div>
+
+                    <div style={S.panel}>
+                      <div style={S.pt}>📋 Crea un mazzo da una lista testo</div>
+                      <div style={{fontSize:12,color:"#94a3b8",marginBottom:10}}>
+                        Incolla una lista tipo "1x Sol Ring" o semplicemente "Sol Ring" (una carta per riga) — funziona anche con liste esportate da altri siti.
+                      </div>
+                      <button style={S.btnP} onClick={()=>setShowTextImport(true)}>📋 Incolla lista testo</button>
                     </div>
 
                     <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
