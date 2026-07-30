@@ -349,8 +349,11 @@
     // abilitati) possono essere comandanti. Approssimazione ragionevole senza
     // dover leggere il testo oracle completo.
     function canBeCommander(card) {
-      const t = (card?.type||"").toLowerCase();
-      const isLegendaryCreature = t.includes("legendary") && t.includes("creature");
+      // Le carte a due facce (es. terre che si trasformano in creatura) hanno il campo
+      // "type" scritto come "Land // Creature — ..." — controlliamo SOLO la faccia
+      // anteriore, altrimenti una terra col retro creatura risulterebbe erroneamente idonea.
+      const frontType = (card?.type||"").split("//")[0].toLowerCase();
+      const isLegendaryCreature = frontType.includes("legendary") && frontType.includes("creature");
       const explicitlyAllowed = (card?.oracleText||"").toLowerCase().includes("can be your commander");
       return isLegendaryCreature || explicitlyAllowed;
     }
@@ -410,7 +413,7 @@
         if (weights[sec] != null) { categoryScore += weights[sec]*0.5; hasMatch = true; }
       });
       const powerScore = (row.power_level ?? 3) * 2;
-      const eligibleForCmc = hasMatch && row.primary_category !== "Land";
+      const eligibleForCmc = hasMatch && !(row.type_line||"").toLowerCase().includes("land");
       const cmcScore = profile.cmcBonus(row.cmc, eligibleForCmc);
       return categoryScore + powerScore + cmcScore;
     }
@@ -1894,31 +1897,41 @@
           const effectiveProfile = { weights: effectiveWeights, cmcBonus: profile.cmcBonus };
 
           const commanderCanonical = canonicalCardName(commander.name);
+          // Terra o no si decide dal TIPO DI CARTA VERO (dato di regolamento, sempre corretto),
+          // non dalla categoria funzionale assegnata dall'IA in fase di tagging — quella è un
+          // giudizio e può occasionalmente confondere un artefatto "tipo terra" (es. una sfera
+          // di mana che entra tappata) con una terra vera e propria.
+          const isLandType = r => (r.type_line||"").toLowerCase().includes("land");
           let candidates = pool.filter(r =>
             canonicalCardName(r.name) !== commanderCanonical &&
             (r.legalities?.commander === "legal") &&
-            r.primary_category !== "Land" // le terre le trattiamo a parte, sotto
+            !isLandType(r) // le terre le trattiamo a parte, sotto
           );
-          let landCandidates = pool.filter(r => r.primary_category === "Land" && (r.legalities?.commander === "legal"));
+          let landCandidates = pool.filter(r => isLandType(r) && (r.legalities?.commander === "legal"));
 
-          // Modalità "solo collezione": restringi ai nomi che possiedi davvero
           const ownedByName = {};
           collection.forEach(oc => {
             const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
             keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
           });
-          if (buildSource === "collection") {
-            candidates = candidates.filter(r => ownedByName[canonicalCardName(r.name)] > 0);
-            landCandidates = landCandidates.filter(r => ownedByName[canonicalCardName(r.name)] > 0);
-          }
+          // Modalità "solo collezione": le carte possedute hanno SEMPRE la precedenza,
+          // ma se non bastano a riempire il mazzo si completa con le migliori disponibili
+          // nel database intero (segnate poi come "da acquistare", non scartate in silenzio)
+          const isOwned = r => ownedByName[canonicalCardName(r.name)] > 0;
 
           setEngineStatus("⚖️ Calcolo il punteggio delle carte…");
-          const scoredNonLands = candidates
-            .map(r => ({ row:r, score: scoreCatalogCard(r, effectiveProfile) }))
-            .sort((a,b) => b.score-a.score);
-          const scoredLands = landCandidates
-            .map(r => ({ row:r, score: (r.power_level??3)*2 + (r.is_staple?2:0) }))
-            .sort((a,b) => b.score-a.score);
+          const scoreSort = (list, scoreFn) => list.map(r => ({ row:r, score: scoreFn(r) })).sort((a,b)=>b.score-a.score);
+          const nonLandScoreFn = r => scoreCatalogCard(r, effectiveProfile);
+          const landScoreFn = r => (r.power_level??3)*2 + (r.is_staple?2:0);
+
+          let scoredNonLands, scoredLands;
+          if (buildSource === "collection") {
+            scoredNonLands = [...scoreSort(candidates.filter(isOwned), nonLandScoreFn), ...scoreSort(candidates.filter(r=>!isOwned(r)), nonLandScoreFn)];
+            scoredLands = [...scoreSort(landCandidates.filter(isOwned), landScoreFn), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), landScoreFn)];
+          } else {
+            scoredNonLands = scoreSort(candidates, nonLandScoreFn);
+            scoredLands = scoreSort(landCandidates, landScoreFn);
+          }
 
           // Singleton: un nome per carta (le terre base sono l'eccezione, gestite a parte)
           const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
@@ -1940,17 +1953,18 @@
             if (landPicks.length >= landCount) break;
           }
           // Completa con terre base nei colori del comandante se non bastano le non-base disponibili
+          // (le terre base contano sempre come "possedute": presupposto ragionevole, chiunque ne ha)
           let basicIdx = 0;
           const identityArr = identity.length ? identity : [null];
           while (landPicks.length < landCount) {
             const color = identityArr[basicIdx % identityArr.length]; basicIdx++;
             const bname = BASIC_LAND_BY_COLOR[color] || "Wastes";
             landPicks.push({ name:bname, type_line:"Basic Land — "+bname, color_identity: color?[color]:[], mana_cost:"", cmc:0,
-              legalities:{commander:"legal"}, prices:{}, image_uris:{}, scryfall_id:null, _isBasic:true });
+              legalities:{commander:"legal"}, prices:{}, image_uris:{}, scryfall_id:null, _isBasic:true, _ownedOverride:true });
           }
 
           function rowToCard(row, isCommanderFlag) {
-            const ownedQty = ownedByName[canonicalCardName(row.name)] || 0;
+            const ownedQty = row._ownedOverride ? 1 : (ownedByName[canonicalCardName(row.name)] || 0);
             return {
               id: crypto.randomUUID(), scryfallId: row.scryfall_id||null, name: row.name, printed_name: row.printed_name||null,
               set: row.set_name||"", setCode: row.set_code||"", collectorNumber: "",
@@ -1969,9 +1983,10 @@
             ...nonLandPicks.map(r=>rowToCard(r,false)),
             ...landPicks.map(r=>rowToCard(r,false)),
           ];
+          const toBuyCount = cardsOut.filter(c=>!c.owned).length;
 
           setEngineStatus(null); setEngineLoading(false);
-          return { cardsOut, landCount, poolSize: pool.length, candidatesFound: candidates.length };
+          return { cardsOut, landCount, poolSize: pool.length, candidatesFound: candidates.length, toBuyCount };
         } catch (e) {
           setEngineStatus(null); setEngineLoading(false);
           alert("Errore nel motore di costruzione: " + (e.message||"riprova"));
@@ -2937,7 +2952,8 @@
                   value={saveDeckName} onChange={e=>setSaveDeckName(e.target.value)} autoFocus />
                 <div style={{fontSize:11,color:"#64748b",marginBottom:16}}>
                   {engineBuildResult
-                    ? `Mazzo Commander da ${engineBuildResult.cardsOut.length} carte, composto dal motore deterministico (${engineBuildResult.landCount} terre). Potrai modificarlo liberamente dopo.`
+                    ? `Mazzo Commander da ${engineBuildResult.cardsOut.length} carte, composto dal motore deterministico (${engineBuildResult.landCount} terre).`+
+                      (engineBuildResult.toBuyCount>0 ? ` ${engineBuildResult.toBuyCount} non sono nella tua collezione — le trovi segnate da cercare, come nei mazzi importati.` : ` Le possiedi tutte già.`)
                     : `Verrà creato un mazzo "${buildFormat}" con le carte suggerite, prese dalla tua collezione. Potrai modificarlo liberamente dopo.`}
                 </div>
                 <button style={{...S.btnP,width:"100%",padding:13}} onClick={engineBuildResult?saveEngineDeckAsReal:saveAiDeckAsReal} disabled={savingAiDeck || !saveDeckName.trim()}>
