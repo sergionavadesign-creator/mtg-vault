@@ -1980,6 +1980,7 @@
       }
 
       const [engineCommanderResults, setEngineCommanderResults] = useState([]);
+      const [engineCommanderMode, setEngineCommanderMode] = useState("search"); // search | random | suggest
       const [engineSearching, setEngineSearching] = useState(false);
       const [engineBuildResult, setEngineBuildResult] = useState(null);
 
@@ -2001,6 +2002,60 @@
               oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"", type: sc.type_line||"",
               legalities: sc.legalities||{}, prices: sc.prices||{}, image: cardImage(sc), artCrop: cardArtCrop(sc)
             })));
+          }
+        } catch { setEngineCommanderResults([]); }
+        setEngineSearching(false);
+      }
+
+      // Converte una carta Scryfall grezza nella forma usata dal resto dell'app
+      function scryfallToCommanderCard(sc) {
+        return {
+          id: crypto.randomUUID(), scryfallId: sc.id, name: sc.name, printed_name: sc.printed_name||null,
+          set: sc.set_name, setCode: sc.set, manaCost: sc.mana_cost||"", colors: sc.colors||[], colorIdentity: sc.color_identity||[],
+          oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"", type: sc.type_line||"",
+          legalities: sc.legalities||{}, prices: sc.prices||{}, image: cardImage(sc), artCrop: cardArtCrop(sc)
+        };
+      }
+
+      async function pickRandomCommander() {
+        setEngineSearching(true);
+        try {
+          if (buildSource === "collection") {
+            const eligible = collection.filter(c=>canBeCommander(c));
+            if (eligible.length===0) { alert("Nessuna creatura leggendaria (o comandante idoneo) nella tua collezione."); setEngineSearching(false); return; }
+            setEngineCommanderRef(eligible[Math.floor(Math.random()*eligible.length)]);
+          } else {
+            const r = await fetch(`https://api.scryfall.com/cards/random?q=${encodeURIComponent('type:legendary type:creature legal:commander')}`);
+            if (r.ok) setEngineCommanderRef(scryfallToCommanderCard(await r.json()));
+          }
+        } catch {}
+        setEngineSearching(false);
+      }
+
+      async function suggestCommandersAI() {
+        setEngineSearching(true); setEngineCommanderResults([]);
+        try {
+          const sourceNote = buildSource==="collection"
+            ? "Scegli SOLO tra le creature leggendarie (idonee a fare da comandante) di questa collezione:\n"+
+              collection.filter(c=>canBeCommander(c)).map(c=>c.name).join(", ")
+            : "Puoi scegliere qualsiasi comandante esistente e legale in Commander.";
+          const prompt = "Sei un esperto di Magic: The Gathering. Suggerisci 4 comandanti adatti a questo stile, per un giocatore che sta imparando Commander.\n\n"+
+            "STILE: "+deckStyle+(deckStyleDesc?" — "+deckStyleDesc:"")+"\nLIVELLO DI POTENZA: "+powerLevel+"\n\n"+
+            sourceNote+"\n\n"+
+            'Rispondi SOLO con un array JSON di 4 nomi esatti in inglese, nessun altro testo: ["Nome 1","Nome 2","Nome 3","Nome 4"]';
+          const raw = await callAiProxy(prompt);
+          let names = [];
+          try { names = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || raw); } catch { names = []; }
+          if (buildSource === "collection") {
+            const results = names.map(n => collection.find(c=>canBeCommander(c) && c.name.toLowerCase()===n.toLowerCase())).filter(Boolean);
+            setEngineCommanderResults(results);
+          } else {
+            const identifiers = names.map(n=>({name:n}));
+            const res = await fetch("https://api.scryfall.com/cards/collection", {
+              method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers })
+            });
+            const d = res.ok ? await res.json() : { data:[] };
+            setEngineCommanderResults((d.data||[]).map(scryfallToCommanderCard));
           }
         } catch { setEngineCommanderResults([]); }
         setEngineSearching(false);
@@ -4262,12 +4317,39 @@
                                 </div>
                               ) : (
                                 <>
-                                  <div style={{display:"flex",gap:8,marginBottom:8}}>
-                                    <input style={{...S.inp,flex:1}} placeholder={buildSource==="collection"?"Cerca tra le tue creature leggendarie…":"Cerca qualsiasi comandante…"}
-                                      value={engineCommanderSearch} onChange={e=>setEngineCommanderSearch(e.target.value)}
-                                      onKeyDown={e=>e.key==="Enter"&&searchEngineCommander()} />
-                                    <button style={S.btnP} onClick={searchEngineCommander} disabled={engineSearching}>{engineSearching?"⏳":"🔍"}</button>
+                                  <div style={{display:"flex",gap:6,marginBottom:10}}>
+                                    {[["search","🔍 Nome"],["random","🎲 A caso"],["suggest","💡 Suggerisci"]].map(([m,l])=>(
+                                      <button key={m} onClick={()=>{setEngineCommanderMode(m);setEngineCommanderResults([]);}}
+                                        style={{flex:1,padding:"7px 4px",borderRadius:6,border:`1px solid ${engineCommanderMode===m?"#f59e0b":"#2d2b3e"}`,
+                                          background:engineCommanderMode===m?"#1e1b2e":"transparent",color:engineCommanderMode===m?"#f59e0b":"#94a3b8",
+                                          cursor:"pointer",fontSize:11,fontWeight:engineCommanderMode===m?700:400}}>
+                                        {l}
+                                      </button>
+                                    ))}
                                   </div>
+
+                                  {engineCommanderMode==="search" && (
+                                    <div style={{display:"flex",gap:8,marginBottom:8}}>
+                                      <input style={{...S.inp,flex:1}} placeholder={buildSource==="collection"?"Cerca tra le tue creature leggendarie…":"Cerca qualsiasi comandante…"}
+                                        value={engineCommanderSearch} onChange={e=>setEngineCommanderSearch(e.target.value)}
+                                        onKeyDown={e=>e.key==="Enter"&&searchEngineCommander()} />
+                                      <button style={S.btnP} onClick={searchEngineCommander} disabled={engineSearching}>{engineSearching?"⏳":"🔍"}</button>
+                                    </div>
+                                  )}
+                                  {engineCommanderMode==="random" && (
+                                    <button style={{...S.btnP,width:"100%",marginBottom:8}} onClick={pickRandomCommander} disabled={engineSearching}>
+                                      {engineSearching?"⏳ Pesco…":"🎲 Pesca un comandante a caso"}
+                                    </button>
+                                  )}
+                                  {engineCommanderMode==="suggest" && (
+                                    <>
+                                      <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>Uso lo stile scelto qui sotto ({deckStyle}) per suggerirti 4 comandanti adatti.</div>
+                                      <button style={{...S.btnP,width:"100%",marginBottom:8}} onClick={suggestCommandersAI} disabled={engineSearching}>
+                                        {engineSearching?"⏳ Penso…":"💡 Suggerisci comandanti"}
+                                      </button>
+                                    </>
+                                  )}
+
                                   <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:220,overflowY:"auto",marginBottom:14}}>
                                     {engineCommanderResults.map(c=>(
                                       <div key={c.id||c.scryfallId} style={{...S.pickItem,cursor:"pointer"}} onClick={()=>{setEngineCommanderRef(c);setEngineCommanderResults([]);}}>
