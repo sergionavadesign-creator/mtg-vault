@@ -370,6 +370,62 @@
         return sum + 1; // simboli ibridi/phyrexian contano 1
       }, 0);
     }
+
+    // ── MOTORE DI SCORING DETERMINISTICO (Fase 2) ──────────────────────────
+    // Stessi pesi validati con il prototipo simulateScoring.mjs su 260 carte.
+    // L'IA non sceglie mai le singole carte qui: decide solo i parametri
+    // (comandante, quante terre, eventuali categorie da premiare in più).
+    const ENGINE_STYLE_PROFILES = {
+      aggressivo: {
+        weights: { "Beater":3, "Scaling Threat":2.5, "Voltron Piece":2, "Aristocrat":1.5, "Tribal Payoff":1.5, "Combo Piece":1 },
+        cmcBonus: (cmc, hasMatch) => hasMatch ? Math.max(0, 3-(cmc??3))*1.5 : 0,
+      },
+      controllo: {
+        weights: { "Card Draw":3, "Removal":2.5, "Board Wipe":2.5, "Counterspell":2.5, "Stax/Disruption":2, "Recursion":1 },
+        cmcBonus: () => 0,
+      },
+      rampa: {
+        weights: { "Ramp":3, "Mana Fixing":2, "Value Creature":1.5, "Win Condition":1.5, "Scaling Threat":1 },
+        cmcBonus: () => 0,
+      },
+      midrange: {
+        weights: { "Value Creature":2.5, "Removal":2, "Card Draw":1.5, "Scaling Threat":1.5, "Beater":1 },
+        cmcBonus: (cmc, hasMatch) => hasMatch ? Math.max(0, 4-(cmc??4))*0.7 : 0,
+      },
+      combo: {
+        weights: { "Combo Piece":4, "Card Draw":2, "Recursion":1.5, "Ramp":1 },
+        cmcBonus: () => 0,
+      },
+    };
+    function safeJsonField(val, fallback) {
+      if (val == null) return fallback;
+      if (typeof val === "object") return val;
+      try { return JSON.parse(val); } catch { return fallback; }
+    }
+    function scoreCatalogCard(row, profile) {
+      const weights = profile.weights;
+      let categoryScore = 0, hasMatch = false;
+      if (row.primary_category && weights[row.primary_category] != null) { categoryScore += weights[row.primary_category]; hasMatch = true; }
+      (row.secondary_categories||[]).forEach(sec => {
+        if (weights[sec] != null) { categoryScore += weights[sec]*0.5; hasMatch = true; }
+      });
+      const powerScore = (row.power_level ?? 3) * 2;
+      const eligibleForCmc = hasMatch && row.primary_category !== "Land";
+      const cmcScore = profile.cmcBonus(row.cmc, eligibleForCmc);
+      return categoryScore + powerScore + cmcScore;
+    }
+    // Interroga card_catalog su Supabase: solo carte con identità cromatica
+    // sottoinsieme di quella richiesta (operatore "contained by" di PostgREST)
+    async function fetchCardCatalogByIdentity(identityColors) {
+      const idLiteral = `{${identityColors.join(",")}}`;
+      const cols = "scryfall_id,oracle_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,power,toughness,legalities,prices,image_uris,is_staple,primary_category,secondary_categories,power_level,synergy_tags";
+      const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&color_identity=cd.${encodeURIComponent(idLiteral)}&limit=8000`;
+      const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
+      if (!res.ok) throw new Error("Impossibile leggere il database carte (card_catalog) — verifica che la policy di lettura sia stata attivata su Supabase.");
+      const rows = await res.json();
+      return rows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
+    }
+
     function getGroupKey(card, groupBy) {
       switch(groupBy) {
         case "mv": { const v = computeCmc(card.manaCost); return v>=7 ? "7+" : String(v); }
@@ -1118,6 +1174,11 @@
       const [buildSource, setBuildSource] = useState("collection"); // "collection" | "all"
       const [deckStyleDesc, setDeckStyleDesc] = useState("");
       const [buildFormat, setBuildFormat] = useState("Commander");
+      const [useEngineV2, setUseEngineV2] = useState(true); // motore deterministico vs. l'AI Advisor testuale
+      const [engineCommanderRef, setEngineCommanderRef] = useState(null);
+      const [engineCommanderSearch, setEngineCommanderSearch] = useState("");
+      const [engineLoading, setEngineLoading] = useState(false);
+      const [engineStatus, setEngineStatus] = useState(null);
       const [buildResult, setBuildResult] = useState(null);
       const [building, setBuilding] = useState(false);
       const [buildingStatus, setBuildingStatus] = useState(null);
@@ -1795,6 +1856,172 @@
       }
 
       // Costruisce mazzo dalle carte in collezione
+      // ── Costruzione mazzo con il motore deterministico (Fase 2) ─────────
+      // L'IA interviene UNA SOLA VOLTA, solo per analizzare il comandante scelto
+      // (non l'intero mazzo): quante terre servono e quali categorie premiare
+      // in più per via delle sue sinergie specifiche. La scelta delle 99 carte
+      // è poi un calcolo deterministico sul database — stessa collezione +
+      // stesso comandante + stesso stile = sempre lo stesso mazzo.
+      async function buildDeckWithEngine() {
+        if (!engineCommanderRef) { alert("Scegli prima un comandante."); return; }
+        setEngineLoading(true); setEngineStatus("🔍 Analizzo il comandante…");
+        try {
+          const commander = engineCommanderRef;
+          const identity = commander.colorIdentity?.length ? commander.colorIdentity : (commander.colors||[]);
+
+          // Piccola chiamata IA: solo parametri, non carte
+          const analysisPrompt = "Sei un esperto di Magic: The Gathering.\n\n"+
+            "COMANDANTE: "+commander.name+"\nTipo: "+(commander.type||"")+"\nTesto: "+(commander.oracleText||"")+"\n\n"+
+            "STILE RICHIESTO: "+deckStyle+(deckStyleDesc?" — "+deckStyleDesc:"")+"\nLIVELLO DI POTENZA: "+powerLevel+"\n\n"+
+            "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
+            '{"landCount": <numero tra 28 e 41>, "categoryBoosts": {"NomeCategoria": <numero 0.5-2>}}\n\n'+
+            "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante.\n"+
+            "categoryBoosts: 0-3 categorie da premiare in più per sinergia diretta col testo del comandante (es. se parla di sacrificio: {\"Aristocrat\": 1.5}). Lascia vuoto {} se non ci sono sinergie chiare. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility, Land.";
+
+          const rawAnalysis = await callAiProxy(analysisPrompt);
+          let analysis;
+          try { analysis = JSON.parse(rawAnalysis.match(/\{[\s\S]*\}/)?.[0] || rawAnalysis); }
+          catch { analysis = { landCount: 37, categoryBoosts: {} }; }
+          const landCount = Math.min(41, Math.max(28, Math.round(analysis.landCount || 37)));
+
+          setEngineStatus("📚 Interrogo il database carte…");
+          const pool = await fetchCardCatalogByIdentity(identity);
+
+          const profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
+          const boosts = analysis.categoryBoosts || {};
+          const effectiveWeights = { ...profile.weights };
+          Object.entries(boosts).forEach(([cat,val]) => { effectiveWeights[cat] = (effectiveWeights[cat]||0) + Number(val||0); });
+          const effectiveProfile = { weights: effectiveWeights, cmcBonus: profile.cmcBonus };
+
+          const commanderCanonical = canonicalCardName(commander.name);
+          let candidates = pool.filter(r =>
+            canonicalCardName(r.name) !== commanderCanonical &&
+            (r.legalities?.commander === "legal") &&
+            r.primary_category !== "Land" // le terre le trattiamo a parte, sotto
+          );
+          let landCandidates = pool.filter(r => r.primary_category === "Land" && (r.legalities?.commander === "legal"));
+
+          // Modalità "solo collezione": restringi ai nomi che possiedi davvero
+          const ownedByName = {};
+          collection.forEach(oc => {
+            const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
+            keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
+          });
+          if (buildSource === "collection") {
+            candidates = candidates.filter(r => ownedByName[canonicalCardName(r.name)] > 0);
+            landCandidates = landCandidates.filter(r => ownedByName[canonicalCardName(r.name)] > 0);
+          }
+
+          setEngineStatus("⚖️ Calcolo il punteggio delle carte…");
+          const scoredNonLands = candidates
+            .map(r => ({ row:r, score: scoreCatalogCard(r, effectiveProfile) }))
+            .sort((a,b) => b.score-a.score);
+          const scoredLands = landCandidates
+            .map(r => ({ row:r, score: (r.power_level??3)*2 + (r.is_staple?2:0) }))
+            .sort((a,b) => b.score-a.score);
+
+          // Singleton: un nome per carta (le terre base sono l'eccezione, gestite a parte)
+          const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
+          const usedNames = new Set();
+          const nonLandPicks = [];
+          for (const {row} of scoredNonLands) {
+            const key = canonicalCardName(row.name);
+            if (usedNames.has(key)) continue;
+            usedNames.add(key);
+            nonLandPicks.push(row);
+            if (nonLandPicks.length >= 99 - landCount) break;
+          }
+          const landPicks = [];
+          for (const {row} of scoredLands) {
+            const key = canonicalCardName(row.name);
+            if (usedNames.has(key) || BASIC_LAND_NAMES.has(key)) continue;
+            usedNames.add(key);
+            landPicks.push(row);
+            if (landPicks.length >= landCount) break;
+          }
+          // Completa con terre base nei colori del comandante se non bastano le non-base disponibili
+          let basicIdx = 0;
+          const identityArr = identity.length ? identity : [null];
+          while (landPicks.length < landCount) {
+            const color = identityArr[basicIdx % identityArr.length]; basicIdx++;
+            const bname = BASIC_LAND_BY_COLOR[color] || "Wastes";
+            landPicks.push({ name:bname, type_line:"Basic Land — "+bname, color_identity: color?[color]:[], mana_cost:"", cmc:0,
+              legalities:{commander:"legal"}, prices:{}, image_uris:{}, scryfall_id:null, _isBasic:true });
+          }
+
+          function rowToCard(row, isCommanderFlag) {
+            const ownedQty = ownedByName[canonicalCardName(row.name)] || 0;
+            return {
+              id: crypto.randomUUID(), scryfallId: row.scryfall_id||null, name: row.name, printed_name: row.printed_name||null,
+              set: row.set_name||"", setCode: row.set_code||"", collectorNumber: "",
+              rarity: "", manaCost: row.mana_cost||"", colors: row.colors||[], colorIdentity: row.color_identity||[],
+              oracleText: row.oracle_text||"", type: row.type_line||"", legalities: row.legalities||{}, prices: row.prices||{},
+              image: row.image_uris?.normal||null, artCrop: row.image_uris?.art_crop||null,
+              qty: 1, owned: ownedQty>0, ownedQty, imported: true, isCommander: !!isCommanderFlag
+            };
+          }
+
+          const cardsOut = [
+            rowToCard({ name:commander.name, printed_name:commander.printed_name, set_name:commander.set, set_code:commander.setCode,
+              mana_cost:commander.manaCost, colors:commander.colors, color_identity:identity, oracle_text:commander.oracleText,
+              type_line:commander.type, legalities:commander.legalities, prices:commander.prices,
+              image_uris:{normal:commander.image, art_crop:commander.artCrop}, scryfall_id:commander.scryfallId }, true),
+            ...nonLandPicks.map(r=>rowToCard(r,false)),
+            ...landPicks.map(r=>rowToCard(r,false)),
+          ];
+
+          setEngineStatus(null); setEngineLoading(false);
+          return { cardsOut, landCount, poolSize: pool.length, candidatesFound: candidates.length };
+        } catch (e) {
+          setEngineStatus(null); setEngineLoading(false);
+          alert("Errore nel motore di costruzione: " + (e.message||"riprova"));
+          return null;
+        }
+      }
+
+      const [engineCommanderResults, setEngineCommanderResults] = useState([]);
+      const [engineSearching, setEngineSearching] = useState(false);
+      const [engineBuildResult, setEngineBuildResult] = useState(null);
+
+      async function searchEngineCommander() {
+        const query = engineCommanderSearch.trim();
+        if (!query) return;
+        setEngineSearching(true);
+        try {
+          if (buildSource === "collection") {
+            const results = collection.filter(c => canBeCommander(c) &&
+              (c.name.toLowerCase().includes(query.toLowerCase()) || (c.printed_name||"").toLowerCase().includes(query.toLowerCase()))).slice(0,15);
+            setEngineCommanderResults(results);
+          } else {
+            const r = await fetch(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('type:legendary type:creature legal:commander '+query)}&unique=cards&order=edhrec`);
+            const d = r.ok ? await r.json() : { data:[] };
+            setEngineCommanderResults((d.data||[]).slice(0,15).map(sc => ({
+              id: crypto.randomUUID(), scryfallId: sc.id, name: sc.name, printed_name: sc.printed_name||null,
+              set: sc.set_name, setCode: sc.set, manaCost: sc.mana_cost||"", colors: sc.colors||[], colorIdentity: sc.color_identity||[],
+              oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"", type: sc.type_line||"",
+              legalities: sc.legalities||{}, prices: sc.prices||{}, image: cardImage(sc), artCrop: cardArtCrop(sc)
+            })));
+          }
+        } catch { setEngineCommanderResults([]); }
+        setEngineSearching(false);
+      }
+
+      async function saveEngineDeckAsReal() {
+        if (!engineBuildResult) return;
+        setSavingAiDeck(true);
+        const deck = { id: crypto.randomUUID(), name: saveDeckName.trim()||"Mazzo (motore V2)", format: "Commander",
+          cards: engineBuildResult.cardsOut, ownerId: activeProfileId, isImported: buildSource==="all", folder: activeFolder||"" };
+        await saveDeck(deck);
+        persist({ ...data, decks: [...data.decks, deck] });
+        setShowSaveDeckPopup(false); setSaveDeckName(""); setSavingAiDeck(false); setEngineBuildResult(null);
+        setTab("decks"); setActiveDeck(deck.id); setDeckView("build");
+      }
+
+      async function runEngineBuild() {
+        const result = await buildDeckWithEngine();
+        if (result) { setEngineBuildResult(result); setShowSaveDeckPopup(true); }
+      }
+
       async function buildDeckFromCollection() {
         setBuilding(true); setBuildResult(null);
         const allCards = collection.map(c => c.qty+"x "+c.name+" ("+c.type+", "+(c.manaCost||"")+ ")").join("\n");
@@ -2644,19 +2871,21 @@
             </div>
           )}
           {showSaveDeckPopup && (
-            <div style={S.modalOverlay} onClick={()=>{if(!savingAiDeck)setShowSaveDeckPopup(false);}}>
+            <div style={S.modalOverlay} onClick={()=>{if(!savingAiDeck){setShowSaveDeckPopup(false);setEngineBuildResult(null);}}}>
               <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
                 <div style={S.modalHeader}>
                   <span style={{fontWeight:700}}>💾 Salva come mazzo</span>
-                  <button style={S.btnGhost} onClick={()=>setShowSaveDeckPopup(false)}>✕</button>
+                  <button style={S.btnGhost} onClick={()=>{setShowSaveDeckPopup(false);setEngineBuildResult(null);}}>✕</button>
                 </div>
                 <label style={S.lbl}>Nome del mazzo</label>
                 <input style={{...S.inp,width:"100%",marginBottom:16}} placeholder="Es. Mazzo Aggro Rosso"
                   value={saveDeckName} onChange={e=>setSaveDeckName(e.target.value)} autoFocus />
                 <div style={{fontSize:11,color:"#64748b",marginBottom:16}}>
-                  Verrà creato un mazzo "{buildFormat}" con le carte suggerite, prese dalla tua collezione. Potrai modificarlo liberamente dopo.
+                  {engineBuildResult
+                    ? `Mazzo Commander da ${engineBuildResult.cardsOut.length} carte, composto dal motore deterministico (${engineBuildResult.landCount} terre). Potrai modificarlo liberamente dopo.`
+                    : `Verrà creato un mazzo "${buildFormat}" con le carte suggerite, prese dalla tua collezione. Potrai modificarlo liberamente dopo.`}
                 </div>
-                <button style={{...S.btnP,width:"100%",padding:13}} onClick={saveAiDeckAsReal} disabled={savingAiDeck || !saveDeckName.trim()}>
+                <button style={{...S.btnP,width:"100%",padding:13}} onClick={engineBuildResult?saveEngineDeckAsReal:saveAiDeckAsReal} disabled={savingAiDeck || !saveDeckName.trim()}>
                   {savingAiDeck ? "⏳ Creo il mazzo…" : "✅ Crea mazzo"}
                 </button>
               </div>
@@ -4010,6 +4239,49 @@
                               cEDH punta a 28-33 terre solo se il mazzo ha fast mana pesante e curva bassissima — l'IA scenderà sotto le 34 solo se riesce davvero a garantirlo con le carte disponibili.
                             </div>
                           )}
+
+                          <div style={{display:"flex",alignItems:"center",gap:10,background:"#0e0c16",borderRadius:8,padding:"10px 12px",marginBottom:14}}>
+                            <input type="checkbox" checked={useEngineV2} onChange={e=>{setUseEngineV2(e.target.checked);setEngineBuildResult(null);}} />
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:12,fontWeight:700}}>⚡ Motore V2 (deterministico)</div>
+                              <div style={{fontSize:10,color:"#64748b",marginTop:2}}>Sceglie le carte dal database invece che dall'IA — sempre legale, stesso mazzo ogni volta con gli stessi input.</div>
+                            </div>
+                          </div>
+
+                          {useEngineV2 && (
+                            <>
+                              <label style={S.lbl}>Comandante</label>
+                              {engineCommanderRef ? (
+                                <div style={{display:"flex",gap:10,alignItems:"center",background:"#0e0c16",borderRadius:8,padding:8,marginBottom:14}}>
+                                  {engineCommanderRef.image && <img src={engineCommanderRef.image} alt={engineCommanderRef.name} style={{width:44,borderRadius:5}} />}
+                                  <div style={{flex:1}}>
+                                    <div style={{fontSize:13,fontWeight:700}}>{engineCommanderRef.printed_name||engineCommanderRef.name}</div>
+                                    <div style={{fontSize:11,color:"#94a3b8"}}>{engineCommanderRef.type}</div>
+                                  </div>
+                                  <button style={S.btnGhost} onClick={()=>{setEngineCommanderRef(null);setEngineCommanderResults([]);}}>Cambia</button>
+                                </div>
+                              ) : (
+                                <>
+                                  <div style={{display:"flex",gap:8,marginBottom:8}}>
+                                    <input style={{...S.inp,flex:1}} placeholder={buildSource==="collection"?"Cerca tra le tue creature leggendarie…":"Cerca qualsiasi comandante…"}
+                                      value={engineCommanderSearch} onChange={e=>setEngineCommanderSearch(e.target.value)}
+                                      onKeyDown={e=>e.key==="Enter"&&searchEngineCommander()} />
+                                    <button style={S.btnP} onClick={searchEngineCommander} disabled={engineSearching}>{engineSearching?"⏳":"🔍"}</button>
+                                  </div>
+                                  <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:220,overflowY:"auto",marginBottom:14}}>
+                                    {engineCommanderResults.map(c=>(
+                                      <div key={c.id||c.scryfallId} style={{...S.pickItem,cursor:"pointer"}} onClick={()=>{setEngineCommanderRef(c);setEngineCommanderResults([]);}}>
+                                        <span style={{flex:1,fontSize:12}}>{c.printed_name||c.name}</span>
+                                        <span style={{fontSize:10,color:"#64748b"}}>{c.type?.split("—")[0]}</span>
+                                      </div>
+                                    ))}
+                                    {engineCommanderResults.length===0 && buildSource==="collection" && collection.length===0 &&
+                                      <div style={{...S.empty,padding:16}}>Aggiungi carte alla collezione prima</div>}
+                                  </div>
+                                </>
+                              )}
+                            </>
+                          )}
                         </>
                       )}
 
@@ -4039,8 +4311,11 @@
 
                       {buildSource==="collection" && collection.length===0 && <div style={{...S.empty,padding:"12px 0",marginBottom:12}}>Aggiungi carte alla collezione prima</div>}
                       <button style={{...S.btnP,width:"100%",padding:13,fontSize:15}}
-                        onClick={buildDeckFromCollection} disabled={(buildSource==="collection"&&collection.length===0)||building}>
-                        {building?(buildingStatus||"⏳ Costruzione mazzo in corso…"):"⚡ Costruisci mazzo"}
+                        onClick={(useEngineV2 && buildFormat==="Commander") ? runEngineBuild : buildDeckFromCollection}
+                        disabled={(buildSource==="collection"&&collection.length===0)||building||engineLoading||(useEngineV2&&buildFormat==="Commander"&&!engineCommanderRef)}>
+                        {engineLoading ? (engineStatus||"⏳ Costruzione in corso…")
+                          : building ? (buildingStatus||"⏳ Costruzione mazzo in corso…")
+                          : "⚡ Costruisci mazzo"}
                       </button>
                     </div>
                     {buildResult && (() => {
