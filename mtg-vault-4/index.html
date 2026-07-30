@@ -131,7 +131,7 @@
           })),
           decks: (decks||[]).map(d => ({
             ...d, ownerId: d.profile_id, isImported: !!d.is_imported, folder: d.folder||"",
-            cards: d.cards || []
+            cards: d.cards || [], strategyNote: d.strategy_note||null
           })),
           games: (games||[]).map(g => ({
             ...g, ownerId: g.profile_id, players: g.players || [], winnerName: g.winner_name
@@ -187,15 +187,16 @@
     async function saveDeck(deck) {
       const payload = {
         id: deck.id, profile_id: deck.ownerId, name: deck.name,
-        format: deck.format, cards: deck.cards, is_imported: !!deck.isImported, folder: deck.folder||null
+        format: deck.format, cards: deck.cards, is_imported: !!deck.isImported, folder: deck.folder||null,
+        strategy_note: deck.strategyNote||null
       };
       try {
         const { error } = await sb.from("decks").upsert(payload);
         if (error) throw error;
       } catch(e) {
-        console.warn("saveDeck: colonna is_imported o folder forse mancante, ritento senza", e);
+        console.warn("saveDeck: colonna is_imported, folder o strategy_note forse mancante, ritento senza", e);
         try {
-          const { is_imported, folder, ...fallback } = payload;
+          const { is_imported, folder, strategy_note, ...fallback } = payload;
           await sb.from("decks").upsert(fallback);
         } catch(e2) { console.error("saveDeck error", e2); }
       }
@@ -1858,6 +1859,40 @@
         setExplaining(false);
       }
 
+      const [showDeckStrategy, setShowDeckStrategy] = useState(false);
+      const [deckStrategyLoading, setDeckStrategyLoading] = useState(false);
+
+      // Spiega come si gioca il mazzo: strategia, sequenza di gioco, condizioni di vittoria.
+      // Il risultato viene salvato sul mazzo stesso (deck.strategyNote) così non va rigenerato
+      // (e ripagato) ogni volta che lo riapri — solo se scegli esplicitamente di rigenerarlo.
+      async function explainDeckStrategy(forceRegenerate) {
+        if (!currentDeck) return;
+        if (currentDeck.strategyNote && !forceRegenerate) { setShowDeckStrategy(true); return; }
+        setShowDeckStrategy(true); setDeckStrategyLoading(true);
+        const commander = deckCardsLive.find(c=>c.isCommander);
+        const cardList = deckCardsLive.filter(c=>!c.isSideboard).map(c=>`${c.qty||1}x ${c.printed_name||c.name} (${(c.type||"").split("—")[0].trim()})`).join("\n");
+        const prompt = "Sei un esperto di Magic: The Gathering, bravo a spiegare le cose in modo semplice a chi sta ancora imparando Commander.\n\n"+
+          "MAZZO: "+currentDeck.name+" ("+currentDeck.format+")\n"+
+          (commander ? "COMANDANTE: "+commander.name+"\n"+(commander.oracleText?"Testo: "+commander.oracleText+"\n":"") : "")+
+          "\nLISTA CARTE:\n"+cardList+"\n\n"+
+          "Spiega in italiano, in modo chiaro e accessibile (chi legge sta imparando il formato), con ESATTAMENTE questa struttura:\n\n"+
+          "**Piano di gioco generale**\n(2-3 righe: qual è l'idea di fondo del mazzo, cosa vuole fare)\n\n"+
+          "**Primi turni**\n(cosa cercare di fare nei primi 3-4 turni)\n\n"+
+          "**Metà e fine partita**\n(come si sviluppa il piano, quando premere l'acceleratore)\n\n"+
+          "**Come si vince**\n(le condizioni di vittoria principali del mazzo, 2-3 carte chiave da tenere d'occhio)\n\n"+
+          "**Consigli per chi lo gioca la prima volta**\n(2-3 errori comuni da evitare, o accorgimenti utili)\n\n"+
+          "Non limitarti a elencare le carte: spiega COME e PERCHÉ, come faresti a un amico che sta imparando.";
+        try {
+          const text = await callAiProxy(prompt);
+          const updatedDeck = { ...currentDeck, strategyNote: text || "Spiegazione non disponibile." };
+          await saveDeck(updatedDeck);
+          persist({ ...data, decks: data.decks.map(d=>d.id===updatedDeck.id?updatedDeck:d) });
+        } catch (e) {
+          persist({ ...data, decks: data.decks.map(d=>d.id===currentDeck.id?{...d, strategyNote: "⚠️ "+(e.message||"Errore di connessione. Riprova.")}:d) });
+        }
+        setDeckStrategyLoading(false);
+      }
+
       // Costruisce mazzo dalle carte in collezione
       // ── Costruzione mazzo con il motore deterministico (Fase 2) ─────────
       // L'IA interviene UNA SOLA VOLTA, solo per analizzare il comandante scelto
@@ -2962,6 +2997,28 @@
               </div>
             </div>
           )}
+          {showDeckStrategy && currentDeck && (
+            <div style={S.modalOverlay} onClick={()=>setShowDeckStrategy(false)}>
+              <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>📖 Come si gioca — {currentDeck.name}</span>
+                  <button style={S.btnGhost} onClick={()=>setShowDeckStrategy(false)}>✕</button>
+                </div>
+                {deckStrategyLoading && (
+                  <div style={{textAlign:"center",padding:"30px 0",color:"#64748b"}}>
+                    <div style={{fontSize:28,marginBottom:8}}>⏳</div>
+                    <div>Analizzo il mazzo…</div>
+                  </div>
+                )}
+                {!deckStrategyLoading && currentDeck.strategyNote && (
+                  <>
+                    {renderAdvisor(currentDeck.strategyNote)}
+                    <button style={{...S.btnGhost,width:"100%",marginTop:12}} onClick={()=>explainDeckStrategy(true)}>🔄 Rigenera spiegazione</button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
           {showTextImport && (
             <div style={S.modalOverlay} onClick={()=>{if(!textImportLoading)setShowTextImport(false);}}>
               <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -3400,6 +3457,7 @@
                       <button style={S.toolbarBtn} onClick={()=>setShowGroupPicker(true)}>
                         🔀 {deckGroupBy==="none"?"Raggruppa":{mv:"Costo mana",type:"Tipo",set:"Set",color:"Colore",colorIdentity:"Identità colore"}[deckGroupBy]}
                       </button>
+                      <button style={S.toolbarBtn} onClick={()=>explainDeckStrategy(false)}>📖 Come si gioca</button>
                       <div style={{...S.viewToggle,marginLeft:"auto"}}>
                         <button style={{...S.viewBtn,...(deckViewMode==="list"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("list")}>☰</button>
                         <button style={{...S.viewBtn,...(deckViewMode==="grid"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("grid")}>▦</button>
