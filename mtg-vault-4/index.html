@@ -1440,10 +1440,14 @@
         const deck = data.decks.find(d => d.id===deckId); if (!deck) return;
         if (card.legalities?.[deck.format.toLowerCase()]!=="legal") { alert(`${card.name} non è legale in ${deck.format}!`); return; }
         const canonName = canonicalCardName(card.name);
-        const existingByName = deck.cards.find(c => canonicalCardName(c.name)===canonName);
-        if (existingByName) {
-          alert(`"${card.printed_name||card.name}" è già richiesta nel mazzo (${existingByName.qty||1}×). Il possesso si aggiorna automaticamente dalla tua collezione: non serve aggiungerla di nuovo.`);
-          return;
+        // Le terre base non hanno limite di copie (in Commander come negli altri formati) —
+        // il controllo "già presente" vale solo per tutte le altre carte, dove ha senso.
+        if (!BASIC_LAND_NAMES.has(canonName)) {
+          const existingByName = deck.cards.find(c => canonicalCardName(c.name)===canonName);
+          if (existingByName) {
+            alert(`"${card.printed_name||card.name}" è già richiesta nel mazzo (${existingByName.qty||1}×). Il possesso si aggiorna automaticamente dalla tua collezione: non serve aggiungerla di nuovo.`);
+            return;
+          }
         }
         guardedDeckAction(deck, { type:"addCard", card });
       }
