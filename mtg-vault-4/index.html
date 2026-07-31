@@ -2227,6 +2227,117 @@
         setTab("decks"); setActiveDeck(deck.id); setDeckView("build");
       }
 
+      const [showAutoComplete, setShowAutoComplete] = useState(false);
+      const [autoCompleteStyle, setAutoCompleteStyle] = useState("midrange");
+      const [autoCompletePower, setAutoCompletePower] = useState("casual");
+      const [autoCompleting, setAutoCompleting] = useState(false);
+      const [autoCompleteStatus, setAutoCompleteStatus] = useState(null);
+
+      // Completa un mazzo Commander creato/modificato a mano: aggiunge SOLO le carte che
+      // mancano per arrivare a 100 (terre nel numero giusto + il resto), senza toccare o
+      // rimuovere nulla di quello che hai già scelto — stesso motore deterministico usato
+      // per la creazione da zero, applicato qui in modalità "riempi i buchi".
+      async function autoCompleteDeck() {
+        if (!currentDeck) return;
+        const commander = deckCardsLive.find(c=>c.isCommander);
+        if (!commander) { alert("Designa prima un comandante (👑 su una creatura leggendaria idonea) prima di completare il mazzo."); return; }
+        const existingCards = deckCardsLive.filter(c=>!c.isCommander && !c.isSideboard);
+        const currentTotal = 1 + existingCards.reduce((s,c)=>s+(c.qty||1),0);
+        if (currentTotal >= 100) { alert(`Il mazzo ha già ${currentTotal} carte — non c'è spazio per aggiungerne altre. Se vuoi rifarlo, rimuovi prima qualche carta.`); setShowAutoComplete(false); return; }
+
+        setAutoCompleting(true); setAutoCompleteStatus("🔍 Analizzo il comandante…");
+        try {
+          const identity = commander.colorIdentity?.length ? commander.colorIdentity : (commander.colors||[]);
+          const analysisPrompt = "Sei un esperto di Magic: The Gathering.\n\n"+
+            "COMANDANTE: "+commander.name+"\nTipo: "+(commander.type||"")+"\nTesto: "+(commander.oracleText||"")+"\n\n"+
+            "STILE RICHIESTO: "+autoCompleteStyle+"\nLIVELLO DI POTENZA: "+autoCompletePower+"\n\n"+
+            "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
+            '{"landCount": <numero tra 28 e 41>, "categoryBoosts": {"NomeCategoria": <numero 0.5-2>}}\n\n'+
+            "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante.\n"+
+            "categoryBoosts: 0-3 categorie da premiare in più per sinergia diretta col testo del comandante. Lascia vuoto {} se non ci sono sinergie chiare. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility, Land.";
+          const rawAnalysis = await callAiProxy(analysisPrompt);
+          let analysis;
+          try { analysis = JSON.parse(rawAnalysis.match(/\{[\s\S]*\}/)?.[0] || rawAnalysis); }
+          catch { analysis = { landCount: 37, categoryBoosts: {} }; }
+          const targetLandCount = Math.min(41, Math.max(28, Math.round(analysis.landCount || 37)));
+
+          setAutoCompleteStatus("📚 Interrogo il database carte…");
+          const pool = await fetchCardCatalogByIdentity(identity);
+          const profile = ENGINE_STYLE_PROFILES[autoCompleteStyle] || ENGINE_STYLE_PROFILES.midrange;
+          const boosts = analysis.categoryBoosts || {};
+          const effectiveWeights = { ...profile.weights };
+          Object.entries(boosts).forEach(([cat,val]) => { effectiveWeights[cat] = (effectiveWeights[cat]||0) + Number(val||0); });
+          const effectiveProfile = { weights: effectiveWeights, cmcBonus: profile.cmcBonus };
+
+          const isLandType = r => (r.type_line||"").toLowerCase().includes("land");
+          const alreadyUsedNames = new Set([canonicalCardName(commander.name), ...existingCards.map(c=>canonicalCardName(c.name))]);
+          const currentLandCount = existingCards.filter(c => (c.type||"").toLowerCase().includes("land")).reduce((s,c)=>s+(c.qty||1),0);
+          const landsStillNeeded = Math.max(0, targetLandCount - currentLandCount);
+          const totalSlotsLeft = 99 - (currentTotal-1);
+          const nonLandsStillNeeded = Math.max(0, totalSlotsLeft - landsStillNeeded);
+
+          setAutoCompleteStatus("⚖️ Scelgo le carte mancanti…");
+          const ownedByName = {};
+          collection.forEach(oc => {
+            const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
+            keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
+          });
+
+          const candidates = pool.filter(r => !isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
+          const landCandidates = pool.filter(r => isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
+          const isOwned = r => ownedByName[canonicalCardName(r.name)] > 0;
+          const scoreSort = (list, scoreFn) => list.map(r => ({ row:r, score: scoreFn(r) })).sort((a,b)=>b.score-a.score);
+          const scoredNonLands = [...scoreSort(candidates.filter(isOwned), r=>scoreCatalogCard(r,effectiveProfile)), ...scoreSort(candidates.filter(r=>!isOwned(r)), r=>scoreCatalogCard(r,effectiveProfile))];
+          const scoredLands = [...scoreSort(landCandidates.filter(isOwned), r=>(r.power_level??3)*2+(r.is_staple?2:0)), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), r=>(r.power_level??3)*2+(r.is_staple?2:0))];
+
+          const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
+          const newlyUsed = new Set(alreadyUsedNames);
+          const nonLandPicks = [];
+          for (const {row} of scoredNonLands) {
+            const key = canonicalCardName(row.name);
+            if (newlyUsed.has(key)) continue;
+            newlyUsed.add(key); nonLandPicks.push(row);
+            if (nonLandPicks.length >= nonLandsStillNeeded) break;
+          }
+          const landPicks = [];
+          for (const {row} of scoredLands) {
+            const key = canonicalCardName(row.name);
+            if (newlyUsed.has(key) || BASIC_LAND_NAMES.has(key)) continue;
+            newlyUsed.add(key); landPicks.push(row);
+            if (landPicks.length >= landsStillNeeded) break;
+          }
+          let basicIdx = 0;
+          const identityArr = identity.length ? identity : [null];
+          while (landPicks.length < landsStillNeeded) {
+            const color = identityArr[basicIdx % identityArr.length]; basicIdx++;
+            const bname = BASIC_LAND_BY_COLOR[color] || "Wastes";
+            landPicks.push({ name:bname, type_line:"Basic Land — "+bname, color_identity: color?[color]:[], mana_cost:"", cmc:0,
+              legalities:{commander:"legal"}, prices:{}, image_uris:{}, scryfall_id:null, _isBasic:true, _ownedOverride:true });
+          }
+
+          function rowToCard(row) {
+            const ownedQty = row._ownedOverride ? 1 : (ownedByName[canonicalCardName(row.name)] || 0);
+            return {
+              id: crypto.randomUUID(), scryfallId: row.scryfall_id||null, name: row.name, printed_name: row.printed_name||null,
+              set: row.set_name||"", setCode: row.set_code||"", collectorNumber: "",
+              rarity: "", manaCost: row.mana_cost||"", colors: row.colors||[], colorIdentity: row.color_identity||[],
+              oracleText: row.oracle_text||"", type: row.type_line||"", legalities: row.legalities||{}, prices: row.prices||{},
+              image: row.image_uris?.normal||null, artCrop: row.image_uris?.art_crop||null,
+              qty: 1, owned: ownedQty>0, ownedQty, imported: true, isCommander: false
+            };
+          }
+          const newCards = [...nonLandPicks.map(rowToCard), ...landPicks.map(rowToCard)];
+          const updatedDeck = { ...currentDeck, cards: [...currentDeck.cards, ...newCards] };
+          await saveDeck(updatedDeck);
+          persist({ ...data, decks: data.decks.map(d=>d.id===updatedDeck.id?updatedDeck:d) });
+          setShowAutoComplete(false);
+          alert(`Aggiunte ${newCards.length} carte (${landPicks.length} terre, ${nonLandPicks.length} altre) — il mazzo ora ha ${currentTotal + newCards.length} carte.`);
+        } catch (e) {
+          alert("Errore nel completamento: " + (e.message||"riprova"));
+        }
+        setAutoCompleteStatus(null); setAutoCompleting(false);
+      }
+
       async function runEngineBuild() {
         const result = await buildDeckWithEngine();
         if (result) { setEngineBuildResult(result); setShowSaveDeckPopup(true); }
@@ -3102,6 +3213,44 @@
               </div>
             </div>
           )}
+          {showAutoComplete && currentDeck && (
+            <div style={S.modalOverlay} onClick={()=>{if(!autoCompleting)setShowAutoComplete(false);}}>
+              <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
+                <div style={S.modalHeader}>
+                  <span style={{fontWeight:700}}>🔧 Completa mazzo automaticamente</span>
+                  <button style={S.btnGhost} onClick={()=>setShowAutoComplete(false)}>✕</button>
+                </div>
+                <div style={{fontSize:12,color:"#94a3b8",marginBottom:16}}>
+                  Aggiunge solo le carte che mancano per arrivare a 100 (terre nel numero giusto + il resto) — non tocca né rimuove nulla di quello che hai già scelto.
+                </div>
+                <label style={S.lbl}>Livello di potenza</label>
+                <div style={{display:"flex",gap:8,marginBottom:14}}>
+                  {[["casual","🎲 Casual"],["ottimizzato","⚙️ Ottimizzato"],["cedh","🏆 cEDH"]].map(([v,l])=>(
+                    <button key={v} onClick={()=>setAutoCompletePower(v)}
+                      style={{flex:1,padding:"9px 4px",borderRadius:7,border:`1px solid ${autoCompletePower===v?"#f59e0b":"#2d2b3e"}`,
+                        background:autoCompletePower===v?"#1e1b2e":"transparent",color:autoCompletePower===v?"#f59e0b":"#94a3b8",
+                        cursor:"pointer",fontSize:12,fontWeight:autoCompletePower===v?700:400}}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                <label style={S.lbl}>Stile di gioco</label>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}}>
+                  {[["aggressivo","⚔️ Aggressivo"],["controllo","🛡️ Controllo"],["combo","💥 Combo"],["midrange","⚖️ Midrange"],["rampa","🌿 Rampa"]].map(([v,l])=>(
+                    <button key={v} onClick={()=>setAutoCompleteStyle(v)}
+                      style={{padding:"8px 4px",borderRadius:7,border:`1px solid ${autoCompleteStyle===v?"#f59e0b":"#2d2b3e"}`,
+                        background:autoCompleteStyle===v?"#1e1b2e":"transparent",color:autoCompleteStyle===v?"#f59e0b":"#94a3b8",
+                        cursor:"pointer",fontSize:12,fontWeight:autoCompleteStyle===v?700:400}}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                <button style={{...S.btnP,width:"100%",padding:13}} onClick={autoCompleteDeck} disabled={autoCompleting}>
+                  {autoCompleting ? (autoCompleteStatus||"⏳ Completo il mazzo…") : "🔧 Completa mazzo"}
+                </button>
+              </div>
+            </div>
+          )}
           {showDeckStrategy && currentDeck && (
             <div style={S.modalOverlay} onClick={()=>setShowDeckStrategy(false)}>
               <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -3568,6 +3717,9 @@
                         🔀 {deckGroupBy==="none"?"Raggruppa":{mv:"Costo mana",type:"Tipo",set:"Set",color:"Colore",colorIdentity:"Identità colore"}[deckGroupBy]}
                       </button>
                       <button style={S.toolbarBtn} onClick={()=>explainDeckStrategy(false)}>📖 Come si gioca</button>
+                      {currentDeck.format==="Commander" && (
+                        <button style={S.toolbarBtn} onClick={()=>setShowAutoComplete(true)}>🔧 Completa mazzo</button>
+                      )}
                       <div style={{...S.viewToggle,marginLeft:"auto"}}>
                         <button style={{...S.viewBtn,...(deckViewMode==="list"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("list")}>☰</button>
                         <button style={{...S.viewBtn,...(deckViewMode==="grid"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("grid")}>▦</button>
