@@ -127,6 +127,7 @@
               ...c, id: c.id, scryfallId: c.scryfall_id, set: c.set_name,
               setCode: c.set_code, collectorNumber: c.collector_number,
               manaCost: c.mana_cost, type: c.type_line, image: c.image, printed_name: c.printed_name||null,
+              colorIdentity: c.color_identity||[], oracleText: c.oracle_text||"", artCrop: c.art_crop||null,
             }))
           })),
           decks: (decks||[]).map(d => ({
@@ -166,15 +167,16 @@
         collector_number: card.collectorNumber, rarity: card.rarity,
         mana_cost: card.manaCost, colors: card.colors, type_line: card.type,
         legalities: card.legalities, prices: card.prices, image: card.image,
-        condition: card.condition, qty: card.qty, foil: !!card.foil
+        condition: card.condition, qty: card.qty, foil: !!card.foil,
+        color_identity: card.colorIdentity||[], oracle_text: card.oracleText||"", art_crop: card.artCrop||null
       };
       try {
         const { error } = await sb.from("cards").upsert(row);
         if (error) throw error;
       } catch(e) {
-        console.warn("saveCard: colonna foil forse mancante, ritento senza", e);
+        console.warn("saveCard: colonna foil/color_identity/oracle_text/art_crop forse mancante, ritento senza", e);
         try {
-          const { foil, ...fallback } = row;
+          const { foil, color_identity, oracle_text, art_crop, ...fallback } = row;
           await sb.from("cards").upsert(fallback);
         } catch(e2) { console.error("saveCard error", e2); }
       }
@@ -1234,6 +1236,68 @@
       }
 
       // Card management
+      const [refreshingCollection, setRefreshingCollection] = useState(false);
+      const [refreshProgress, setRefreshProgress] = useState(null);
+
+      // Ripassa ogni carta della collezione e la ricerca di nuovo su Scryfall, per recuperare
+      // dati mancanti (identità cromatica, testo, immagine) — utile per carte aggiunte a mano
+      // nelle prime fasi, prima che fossero disponibili su Scryfall, o salvate prima che l'app
+      // registrasse questi campi. Le carte non trovate restano invariate, nessuna viene persa.
+      async function refreshCollectionCards() {
+        if (!activeProfile || collection.length===0) return;
+        setRefreshingCollection(true);
+        let updated = 0, notFound = [];
+        try {
+          const cardsToCheck = [...collection];
+          const identifiers = cardsToCheck.map(c => c.scryfallId ? {id:c.scryfallId} : {name:c.name});
+          const chunks = []; for (let i=0;i<identifiers.length;i+=75) chunks.push(identifiers.slice(i,i+75));
+          const scryMap = {};
+          for (let i=0;i<chunks.length;i++) {
+            setRefreshProgress(`🔍 Controllo lotto ${i+1}/${chunks.length}…`);
+            try {
+              const res = await fetch("https://api.scryfall.com/cards/collection", {
+                method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers: chunks[i] })
+              });
+              if (res.ok) { const dd = await res.json(); (dd.data||[]).forEach(sc => { scryMap[sc.id] = sc; scryMap[sc.name.toLowerCase()] = sc; }); }
+            } catch {}
+          }
+          // Fuzzy di riserva per le carte non trovate con la ricerca esatta (nomi imprecisi,
+          // o inserite a mano con una grafia leggermente diversa da quella ufficiale)
+          const stillMissing = cardsToCheck.filter(c => !(c.scryfallId && scryMap[c.scryfallId]) && !scryMap[c.name.toLowerCase()]);
+          for (let i=0;i<stillMissing.length;i++) {
+            setRefreshProgress(`🔍 Cerco corrispondenze approssimative (${i+1}/${stillMissing.length})…`);
+            try {
+              const r = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(stillMissing[i].name)}`);
+              if (r.ok) { const sc = await r.json(); if (sc?.name) scryMap[stillMissing[i].id] = sc; }
+            } catch {}
+          }
+
+          setRefreshProgress("💾 Aggiorno i dati…");
+          const updatedCards = [];
+          for (const c of cardsToCheck) {
+            const sc = (c.scryfallId && scryMap[c.scryfallId]) || scryMap[c.name.toLowerCase()] || scryMap[c.id];
+            if (!sc) { notFound.push(c.printed_name||c.name); updatedCards.push(c); continue; }
+            const refreshed = {
+              ...c, scryfallId: sc.id, printed_name: sc.printed_name||c.printed_name||null,
+              set: sc.set_name, setCode: sc.set, collectorNumber: sc.collector_number, rarity: sc.rarity,
+              manaCost: sc.mana_cost||sc.card_faces?.[0]?.mana_cost||"",
+              colors: (sc.colors?.length?sc.colors:sc.card_faces?.[0]?.colors)||[],
+              colorIdentity: sc.color_identity||[], oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
+              type: sc.type_line||"", legalities: sc.legalities||{}, prices: sc.prices||{},
+              image: cardImage(sc)||c.image, artCrop: cardArtCrop(sc)||c.artCrop||null,
+            };
+            updatedCards.push(refreshed);
+            await saveCard(refreshed, activeProfileId);
+            updated++;
+          }
+          persist({ ...data, profiles: data.profiles.map(p => p.id===activeProfileId ? { ...p, cards: updatedCards } : p) });
+        } catch (e) {
+          alert("Errore durante l'aggiornamento: "+(e.message||"riprova"));
+        }
+        setRefreshProgress(null); setRefreshingCollection(false);
+        alert(`Aggiornamento completato: ${updated} carte aggiornate.`+(notFound.length ? ` ${notFound.length} non trovate su Scryfall (lasciate invariate): ${notFound.slice(0,10).join(", ")}${notFound.length>10?"…":""}` : ""));
+      }
+
       async function addCard(card, condition, qty, foil) {
         const newCard = {
           id: crypto.randomUUID(), scryfallId:card.id, name:card.name, printed_name:card.printed_name||null,
@@ -2082,32 +2146,43 @@
         setEngineSearching(false);
       }
 
-      async function suggestCommandersAI() {
+      // Suggerisce comandanti coerenti con lo stile SENZA usare l'IA a memoria: interroga il
+      // database delle creature leggendarie e applica lo STESSO motore di punteggio già usato
+      // per scegliere le 99 carte — così un comandante "da valore lento" non finisce suggerito
+      // per uno stile "aggressivo" solo perché l'IA lo ricordava genericamente forte.
+      async function suggestCommandersEngine() {
         setEngineSearching(true); setEngineCommanderResults([]);
         try {
-          const sourceNote = buildSource==="collection"
-            ? "Scegli SOLO tra le creature leggendarie (idonee a fare da comandante) di questa collezione:\n"+
-              collection.filter(c=>canBeCommander(c)).map(c=>c.name).join(", ")
-            : "Puoi scegliere qualsiasi comandante esistente e legale in Commander.";
-          const prompt = "Sei un esperto di Magic: The Gathering. Suggerisci 4 comandanti adatti a questo stile, per un giocatore che sta imparando Commander.\n\n"+
-            "STILE: "+deckStyle+(deckStyleDesc?" — "+deckStyleDesc:"")+"\nLIVELLO DI POTENZA: "+powerLevel+"\n\n"+
-            sourceNote+"\n\n"+
-            'Rispondi SOLO con un array JSON di 4 nomi esatti in inglese, nessun altro testo: ["Nome 1","Nome 2","Nome 3","Nome 4"]';
-          const raw = await callAiProxy(prompt);
-          let names = [];
-          try { names = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || raw); } catch { names = []; }
+          const profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
+          let pool;
           if (buildSource === "collection") {
-            const results = names.map(n => collection.find(c=>canBeCommander(c) && c.name.toLowerCase()===n.toLowerCase())).filter(Boolean);
-            setEngineCommanderResults(results);
+            const eligible = collection.filter(c=>canBeCommander(c));
+            if (eligible.length===0) { alert("Nessuna creatura leggendaria (o comandante idoneo) nella tua collezione."); setEngineSearching(false); return; }
+            const namesList = eligible.map(c => `"${c.name.replace(/"/g,'\\"')}"`).join(",");
+            const cols = "scryfall_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,legalities,prices,image_uris,primary_category,secondary_categories,power_level";
+            const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&name=in.(${encodeURIComponent(namesList)})`;
+            const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
+            const rows = res.ok ? await res.json() : [];
+            pool = rows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
           } else {
-            const identifiers = names.map(n=>({name:n}));
-            const res = await fetch("https://api.scryfall.com/cards/collection", {
-              method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers })
-            });
-            const d = res.ok ? await res.json() : { data:[] };
-            setEngineCommanderResults((d.data||[]).map(scryfallToCommanderCard));
+            const cols = "scryfall_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,legalities,prices,image_uris,primary_category,secondary_categories,power_level";
+            const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&type_line=ilike.*Legendary*&type_line=ilike.*Creature*&legalities->>commander=eq.legal&limit=3000`;
+            const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
+            const rows = res.ok ? await res.json() : [];
+            pool = rows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
           }
-        } catch { setEngineCommanderResults([]); }
+          pool = pool.filter(r => (r.type_line||"").toLowerCase().includes("legendary") && (r.type_line||"").toLowerCase().includes("creature"));
+          const scored = pool
+            .map(r => ({ row:r, score: scoreCatalogCard(r, profile) }))
+            .sort((a,b)=>b.score-a.score)
+            .slice(0,8);
+          setEngineCommanderResults(scored.map(({row}) => ({
+            id: crypto.randomUUID(), scryfallId: row.scryfall_id, name: row.name, printed_name: row.printed_name||null,
+            set: row.set_name, setCode: row.set_code, manaCost: row.mana_cost||"", colors: row.colors||[], colorIdentity: row.color_identity||[],
+            oracleText: row.oracle_text||"", type: row.type_line||"", legalities: row.legalities||{}, prices: row.prices||{},
+            image: row.image_uris?.normal||null, artCrop: row.image_uris?.art_crop||null
+          })));
+        } catch (e) { setEngineCommanderResults([]); alert("Errore nella ricerca: "+(e.message||"riprova")); }
         setEngineSearching(false);
       }
 
@@ -3222,6 +3297,11 @@
                   📊 {statsOpen?"Nascondi statistiche":"Mostra statistiche collezione"}
                 </button>
                 {statsOpen && <CollectionStats collection={collection} ownedCardPrice={ownedCardPrice} />}
+
+                <button style={{...S.btnGhost, width:"100%", padding:12, textAlign:"center"}}
+                  onClick={refreshCollectionCards} disabled={refreshingCollection || collection.length===0}>
+                  {refreshingCollection ? (refreshProgress||"⏳ Aggiorno…") : "🔄 Aggiorna dati carte (identità, testo, immagini)"}
+                </button>
 
                 <button style={{...S.btnP, width:"100%", padding:14, fontSize:15}}
                   onClick={() => setShowScan(true)}>
@@ -4417,9 +4497,9 @@
                                   )}
                                   {engineCommanderMode==="suggest" && (
                                     <>
-                                      <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>Uso lo stile scelto qui sotto ({deckStyle}) per suggerirti 4 comandanti adatti.</div>
-                                      <button style={{...S.btnP,width:"100%",marginBottom:8}} onClick={suggestCommandersAI} disabled={engineSearching}>
-                                        {engineSearching?"⏳ Penso…":"💡 Suggerisci comandanti"}
+                                      <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>Cerca nel database le creature leggendarie con il punteggio più alto per lo stile scelto qui sotto ({deckStyle}) — stesso motore usato per il resto del mazzo, non un suggerimento a memoria dell'IA.</div>
+                                      <button style={{...S.btnP,width:"100%",marginBottom:8}} onClick={suggestCommandersEngine} disabled={engineSearching}>
+                                        {engineSearching?"⏳ Cerco…":"💡 Migliori per questo stile"}
                                       </button>
                                     </>
                                   )}
