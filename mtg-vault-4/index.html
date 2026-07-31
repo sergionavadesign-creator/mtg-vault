@@ -2230,20 +2230,21 @@
       const [showAutoComplete, setShowAutoComplete] = useState(false);
       const [autoCompleteStyle, setAutoCompleteStyle] = useState("midrange");
       const [autoCompletePower, setAutoCompletePower] = useState("casual");
+      const [autoCompleteSource, setAutoCompleteSource] = useState("collection"); // "collection" | "all"
       const [autoCompleting, setAutoCompleting] = useState(false);
       const [autoCompleteStatus, setAutoCompleteStatus] = useState(null);
 
-      // Completa un mazzo Commander creato/modificato a mano: aggiunge SOLO le carte che
-      // mancano per arrivare a 100 (terre nel numero giusto + il resto), senza toccare o
-      // rimuovere nulla di quello che hai già scelto — stesso motore deterministico usato
-      // per la creazione da zero, applicato qui in modalità "riempi i buchi".
-      async function autoCompleteDeck() {
+      // Sistema un mazzo Commander creato/modificato a mano: se ha MENO di 100 carte, aggiunge
+      // solo quelle che mancano (terre nel numero giusto + il resto); se ne ha PIÙ di 100, taglia
+      // le carte più deboli secondo lo stesso motore di punteggio, provando a salvare per prime
+      // quelle che possiedi se hai scelto "dalla mia collezione". Non tocca mai il comandante.
+      async function autoFixDeck() {
         if (!currentDeck) return;
         const commander = deckCardsLive.find(c=>c.isCommander);
-        if (!commander) { alert("Designa prima un comandante (👑 su una creatura leggendaria idonea) prima di completare il mazzo."); return; }
+        if (!commander) { alert("Designa prima un comandante (👑 su una creatura leggendaria idonea) prima di sistemare il mazzo."); return; }
         const existingCards = deckCardsLive.filter(c=>!c.isCommander && !c.isSideboard);
         const currentTotal = 1 + existingCards.reduce((s,c)=>s+(c.qty||1),0);
-        if (currentTotal >= 100) { alert(`Il mazzo ha già ${currentTotal} carte — non c'è spazio per aggiungerne altre. Se vuoi rifarlo, rimuovi prima qualche carta.`); setShowAutoComplete(false); return; }
+        if (currentTotal === 100) { alert("Il mazzo ha già esattamente 100 carte — niente da sistemare."); setShowAutoComplete(false); return; }
 
         setAutoCompleting(true); setAutoCompleteStatus("🔍 Analizzo il comandante…");
         try {
@@ -2261,77 +2262,158 @@
           catch { analysis = { landCount: 37, categoryBoosts: {} }; }
           const targetLandCount = Math.min(41, Math.max(28, Math.round(analysis.landCount || 37)));
 
-          setAutoCompleteStatus("📚 Interrogo il database carte…");
-          const pool = await fetchCardCatalogByIdentity(identity);
           const profile = ENGINE_STYLE_PROFILES[autoCompleteStyle] || ENGINE_STYLE_PROFILES.midrange;
           const boosts = analysis.categoryBoosts || {};
           const effectiveWeights = { ...profile.weights };
           Object.entries(boosts).forEach(([cat,val]) => { effectiveWeights[cat] = (effectiveWeights[cat]||0) + Number(val||0); });
           const effectiveProfile = { weights: effectiveWeights, cmcBonus: profile.cmcBonus };
+          const isLandType = c => (c.type||c.type_line||"").toLowerCase().includes("land");
 
-          const isLandType = r => (r.type_line||"").toLowerCase().includes("land");
-          const alreadyUsedNames = new Set([canonicalCardName(commander.name), ...existingCards.map(c=>canonicalCardName(c.name))]);
-          const currentLandCount = existingCards.filter(c => (c.type||"").toLowerCase().includes("land")).reduce((s,c)=>s+(c.qty||1),0);
-          const landsStillNeeded = Math.max(0, targetLandCount - currentLandCount);
-          const totalSlotsLeft = 99 - (currentTotal-1);
-          const nonLandsStillNeeded = Math.max(0, totalSlotsLeft - landsStillNeeded);
-
-          setAutoCompleteStatus("⚖️ Scelgo le carte mancanti…");
           const ownedByName = {};
           collection.forEach(oc => {
             const keys = new Set([canonicalCardName(oc.name), canonicalCardName(oc.printed_name)].filter(Boolean));
             keys.forEach(key => { ownedByName[key] = (ownedByName[key]||0) + (oc.qty||1); });
           });
+          const isOwned = c => ownedByName[canonicalCardName(c.name)] > 0;
 
-          const candidates = pool.filter(r => !isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
-          const landCandidates = pool.filter(r => isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
-          const isOwned = r => ownedByName[canonicalCardName(r.name)] > 0;
-          const scoreSort = (list, scoreFn) => list.map(r => ({ row:r, score: scoreFn(r) })).sort((a,b)=>b.score-a.score);
-          const scoredNonLands = [...scoreSort(candidates.filter(isOwned), r=>scoreCatalogCard(r,effectiveProfile)), ...scoreSort(candidates.filter(r=>!isOwned(r)), r=>scoreCatalogCard(r,effectiveProfile))];
-          const scoredLands = [...scoreSort(landCandidates.filter(isOwned), r=>(r.power_level??3)*2+(r.is_staple?2:0)), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), r=>(r.power_level??3)*2+(r.is_staple?2:0))];
+          if (currentTotal < 100) {
+            // ── AGGIUNGI le carte mancanti ──────────────────────────────
+            setAutoCompleteStatus("📚 Interrogo il database carte…");
+            const pool = await fetchCardCatalogByIdentity(identity);
+            const alreadyUsedNames = new Set([canonicalCardName(commander.name), ...existingCards.map(c=>canonicalCardName(c.name))]);
+            const currentLandCount = existingCards.filter(isLandType).reduce((s,c)=>s+(c.qty||1),0);
+            const landsStillNeeded = Math.max(0, targetLandCount - currentLandCount);
+            const totalSlotsLeft = 99 - (currentTotal-1);
+            const nonLandsStillNeeded = Math.max(0, totalSlotsLeft - landsStillNeeded);
 
-          const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
-          const newlyUsed = new Set(alreadyUsedNames);
-          const nonLandPicks = [];
-          for (const {row} of scoredNonLands) {
-            const key = canonicalCardName(row.name);
-            if (newlyUsed.has(key)) continue;
-            newlyUsed.add(key); nonLandPicks.push(row);
-            if (nonLandPicks.length >= nonLandsStillNeeded) break;
-          }
-          const landPicks = [];
-          for (const {row} of scoredLands) {
-            const key = canonicalCardName(row.name);
-            if (newlyUsed.has(key) || BASIC_LAND_NAMES.has(key)) continue;
-            newlyUsed.add(key); landPicks.push(row);
-            if (landPicks.length >= landsStillNeeded) break;
-          }
-          let basicIdx = 0;
-          const identityArr = identity.length ? identity : [null];
-          while (landPicks.length < landsStillNeeded) {
-            const color = identityArr[basicIdx % identityArr.length]; basicIdx++;
-            const bname = BASIC_LAND_BY_COLOR[color] || "Wastes";
-            landPicks.push({ name:bname, type_line:"Basic Land — "+bname, color_identity: color?[color]:[], mana_cost:"", cmc:0,
-              legalities:{commander:"legal"}, prices:{}, image_uris:{}, scryfall_id:null, _isBasic:true, _ownedOverride:true });
-          }
+            setAutoCompleteStatus("⚖️ Scelgo le carte mancanti…");
+            const candidates = pool.filter(r => !isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
+            const landCandidates = pool.filter(r => isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
+            const scoreSort = (list, scoreFn) => list.map(r => ({ row:r, score: scoreFn(r) })).sort((a,b)=>b.score-a.score);
+            // In modalità "tutte le carte esistenti" ignoriamo il possesso: si sceglie solo per punteggio
+            const scoredNonLands = autoCompleteSource==="collection"
+              ? [...scoreSort(candidates.filter(isOwned), r=>scoreCatalogCard(r,effectiveProfile)), ...scoreSort(candidates.filter(r=>!isOwned(r)), r=>scoreCatalogCard(r,effectiveProfile))]
+              : scoreSort(candidates, r=>scoreCatalogCard(r,effectiveProfile));
+            const scoredLands = autoCompleteSource==="collection"
+              ? [...scoreSort(landCandidates.filter(isOwned), r=>(r.power_level??3)*2+(r.is_staple?2:0)), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), r=>(r.power_level??3)*2+(r.is_staple?2:0))]
+              : scoreSort(landCandidates, r=>(r.power_level??3)*2+(r.is_staple?2:0));
 
-          function rowToCard(row) {
-            const ownedQty = row._ownedOverride ? 1 : (ownedByName[canonicalCardName(row.name)] || 0);
-            return {
-              id: crypto.randomUUID(), scryfallId: row.scryfall_id||null, name: row.name, printed_name: row.printed_name||null,
-              set: row.set_name||"", setCode: row.set_code||"", collectorNumber: "",
-              rarity: "", manaCost: row.mana_cost||"", colors: row.colors||[], colorIdentity: row.color_identity||[],
-              oracleText: row.oracle_text||"", type: row.type_line||"", legalities: row.legalities||{}, prices: row.prices||{},
-              image: row.image_uris?.normal||null, artCrop: row.image_uris?.art_crop||null,
-              qty: 1, owned: ownedQty>0, ownedQty, imported: true, isCommander: false
-            };
+            const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
+            const newlyUsed = new Set(alreadyUsedNames);
+            const nonLandPicks = [];
+            for (const {row} of scoredNonLands) {
+              const key = canonicalCardName(row.name);
+              if (newlyUsed.has(key)) continue;
+              newlyUsed.add(key); nonLandPicks.push(row);
+              if (nonLandPicks.length >= nonLandsStillNeeded) break;
+            }
+            const landPicks = [];
+            for (const {row} of scoredLands) {
+              const key = canonicalCardName(row.name);
+              if (newlyUsed.has(key) || BASIC_LAND_NAMES.has(key)) continue;
+              newlyUsed.add(key); landPicks.push(row);
+              if (landPicks.length >= landsStillNeeded) break;
+            }
+            let basicIdx = 0;
+            const identityArr = identity.length ? identity : [null];
+            while (landPicks.length < landsStillNeeded) {
+              const color = identityArr[basicIdx % identityArr.length]; basicIdx++;
+              const bname = BASIC_LAND_BY_COLOR[color] || "Wastes";
+              landPicks.push({ name:bname, type_line:"Basic Land — "+bname, color_identity: color?[color]:[], mana_cost:"", cmc:0,
+                legalities:{commander:"legal"}, prices:{}, image_uris:{}, scryfall_id:null, _isBasic:true, _ownedOverride:true });
+            }
+
+            function rowToCard(row) {
+              const ownedQty = row._ownedOverride ? 1 : (ownedByName[canonicalCardName(row.name)] || 0);
+              return {
+                id: crypto.randomUUID(), scryfallId: row.scryfall_id||null, name: row.name, printed_name: row.printed_name||null,
+                set: row.set_name||"", setCode: row.set_code||"", collectorNumber: "",
+                rarity: "", manaCost: row.mana_cost||"", colors: row.colors||[], colorIdentity: row.color_identity||[],
+                oracleText: row.oracle_text||"", type: row.type_line||"", legalities: row.legalities||{}, prices: row.prices||{},
+                image: row.image_uris?.normal||null, artCrop: row.image_uris?.art_crop||null,
+                qty: 1, owned: ownedQty>0, ownedQty, imported: true, isCommander: false
+              };
+            }
+            const newCards = [...nonLandPicks.map(rowToCard), ...landPicks.map(rowToCard)];
+            const updatedDeck = { ...currentDeck, cards: [...currentDeck.cards, ...newCards] };
+            await saveDeck(updatedDeck);
+            persist({ ...data, decks: data.decks.map(d=>d.id===updatedDeck.id?updatedDeck:d) });
+            setShowAutoComplete(false);
+            alert(`Aggiunte ${newCards.length} carte (${landPicks.length} terre, ${nonLandPicks.length} altre) — il mazzo ora ha ${currentTotal + newCards.length} carte.`);
+
+          } else {
+            // ── RIDUCI il mazzo troppo grande, tagliando le carte più deboli ──
+            setAutoCompleteStatus("📚 Recupero i punteggi delle carte…");
+            const names = existingCards.map(c=>c.name);
+            const chunks = []; for (let i=0;i<names.length;i+=40) chunks.push(names.slice(i,i+40));
+            const tagByName = {};
+            for (const chunk of chunks) {
+              const namesList = chunk.map(n => `"${n.replace(/"/g,'\\"')}"`).join(",");
+              const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=name,primary_category,secondary_categories,power_level,is_staple&name=in.(${encodeURIComponent(namesList)})`;
+              try {
+                const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
+                if (res.ok) { const rows = await res.json(); rows.forEach(r => { tagByName[canonicalCardName(r.name)] = r; }); }
+              } catch {}
+            }
+            setAutoCompleteStatus("⚖️ Valuto quali carte tagliare…");
+            function scoreExisting(card, isLand) {
+              const tag = tagByName[canonicalCardName(card.name)] || {};
+              const base = isLand ? (tag.power_level??3)*2+(tag.is_staple?2:0) : scoreCatalogCard({ ...tag, cmc: computeCmc(card.manaCost) }, effectiveProfile);
+              // In modalità "solo collezione" diamo un piccolo vantaggio alle carte possedute,
+              // così a parità di forza si tagliano prima quelle che NON hai
+              return autoCompleteSource==="collection" ? base + (isOwned(card)?1.5:0) : base;
+            }
+            const lands = existingCards.filter(isLandType).map(c => ({ card:c, score: scoreExisting(c,true) })).sort((a,b)=>a.score-b.score);
+            const nonLands = existingCards.filter(c=>!isLandType(c)).map(c => ({ card:c, score: scoreExisting(c,false) })).sort((a,b)=>a.score-b.score);
+            const currentLandCount = lands.reduce((s,{card})=>s+(card.qty||1),0);
+
+            let toCutQty = currentTotal - 100;
+            const cutIds = new Set();
+            const cutQtyReduce = new Map(); // per carte con qty>1, si può ridurre invece di rimuovere del tutto
+            // Se ci sono più terre del bersaglio, tagliamo prima l'eccesso di terre più deboli
+            let landExcess = Math.max(0, currentLandCount - targetLandCount);
+            for (const {card} of lands) {
+              if (toCutQty<=0 || landExcess<=0) break;
+              const take = Math.min(card.qty||1, landExcess, toCutQty);
+              cutQtyReduce.set(card.id, (cutQtyReduce.get(card.id)||0)+take);
+              landExcess -= take; toCutQty -= take;
+            }
+            // Il resto del taglio necessario viene dalle carte non-terra più deboli
+            for (const {card} of nonLands) {
+              if (toCutQty<=0) break;
+              const take = Math.min(card.qty||1, toCutQty);
+              cutQtyReduce.set(card.id, (cutQtyReduce.get(card.id)||0)+take);
+              toCutQty -= take;
+            }
+            // Se serve ancora (raro: terre finite prima di raggiungere il target), tagliamo altre terre
+            if (toCutQty>0) {
+              for (const {card} of lands) {
+                if (toCutQty<=0) break;
+                const already = cutQtyReduce.get(card.id)||0;
+                const remainingQty = (card.qty||1) - already;
+                if (remainingQty<=0) continue;
+                const take = Math.min(remainingQty, toCutQty);
+                cutQtyReduce.set(card.id, already+take);
+                toCutQty -= take;
+              }
+            }
+
+            const removedNames = [];
+            const newCards = currentDeck.cards.map(c => {
+              const cut = cutQtyReduce.get(c.id);
+              if (!cut) return c;
+              const newQty = (c.qty||1) - cut;
+              if (newQty<=0) { removedNames.push(c.printed_name||c.name); return null; }
+              removedNames.push(`${c.printed_name||c.name} (-${cut})`);
+              return { ...c, qty:newQty };
+            }).filter(Boolean);
+
+            const updatedDeck = { ...currentDeck, cards: newCards };
+            await saveDeck(updatedDeck);
+            persist({ ...data, decks: data.decks.map(d=>d.id===updatedDeck.id?updatedDeck:d) });
+            setShowAutoComplete(false);
+            alert(`Rimosse/ridotte ${currentTotal-100} carte per tornare a 100 — le più deboli secondo lo stile scelto: ${removedNames.slice(0,8).join(", ")}${removedNames.length>8?"…":""}`);
           }
-          const newCards = [...nonLandPicks.map(rowToCard), ...landPicks.map(rowToCard)];
-          const updatedDeck = { ...currentDeck, cards: [...currentDeck.cards, ...newCards] };
-          await saveDeck(updatedDeck);
-          persist({ ...data, decks: data.decks.map(d=>d.id===updatedDeck.id?updatedDeck:d) });
-          setShowAutoComplete(false);
-          alert(`Aggiunte ${newCards.length} carte (${landPicks.length} terre, ${nonLandPicks.length} altre) — il mazzo ora ha ${currentTotal + newCards.length} carte.`);
         } catch (e) {
           alert("Errore nel completamento: " + (e.message||"riprova"));
         }
@@ -3213,15 +3295,32 @@
               </div>
             </div>
           )}
-          {showAutoComplete && currentDeck && (
+          {showAutoComplete && currentDeck && (() => {
+            const existingN = deckCardsLive.filter(c=>!c.isCommander && !c.isSideboard);
+            const totalN = 1 + existingN.reduce((s,c)=>s+(c.qty||1),0);
+            const isOver = totalN > 100;
+            return (
             <div style={S.modalOverlay} onClick={()=>{if(!autoCompleting)setShowAutoComplete(false);}}>
               <div style={S.modalBox} onClick={e=>e.stopPropagation()} className="fade-in">
                 <div style={S.modalHeader}>
-                  <span style={{fontWeight:700}}>🔧 Completa mazzo automaticamente</span>
+                  <span style={{fontWeight:700}}>{isOver ? "✂️ Riduci mazzo a 100 carte" : "🔧 Completa mazzo automaticamente"}</span>
                   <button style={S.btnGhost} onClick={()=>setShowAutoComplete(false)}>✕</button>
                 </div>
                 <div style={{fontSize:12,color:"#94a3b8",marginBottom:16}}>
-                  Aggiunge solo le carte che mancano per arrivare a 100 (terre nel numero giusto + il resto) — non tocca né rimuove nulla di quello che hai già scelto.
+                  {isOver
+                    ? `Il mazzo ha ${totalN} carte, ${totalN-100} di troppo. Taglio le carte più deboli secondo lo stile scelto sotto (mai il comandante), rispettando comunque il numero di terre giusto.`
+                    : "Aggiunge solo le carte che mancano per arrivare a 100 (terre nel numero giusto + il resto) — non tocca né rimuove nulla di quello che hai già scelto."}
+                </div>
+                <label style={S.lbl}>Sorgente carte</label>
+                <div style={{display:"flex",gap:8,marginBottom:14}}>
+                  {[["collection", isOver?"📚 Salva le tue":"📚 Dalla mia collezione"],["all", isOver?"🌍 Solo per punteggio":"🌍 Tutte le carte esistenti"]].map(([v,l])=>(
+                    <button key={v} onClick={()=>setAutoCompleteSource(v)}
+                      style={{flex:1,padding:"9px 4px",borderRadius:7,border:`1px solid ${autoCompleteSource===v?"#f59e0b":"#2d2b3e"}`,
+                        background:autoCompleteSource===v?"#1e1b2e":"transparent",color:autoCompleteSource===v?"#f59e0b":"#94a3b8",
+                        cursor:"pointer",fontSize:11,fontWeight:autoCompleteSource===v?700:400}}>
+                      {l}
+                    </button>
+                  ))}
                 </div>
                 <label style={S.lbl}>Livello di potenza</label>
                 <div style={{display:"flex",gap:8,marginBottom:14}}>
@@ -3245,12 +3344,12 @@
                     </button>
                   ))}
                 </div>
-                <button style={{...S.btnP,width:"100%",padding:13}} onClick={autoCompleteDeck} disabled={autoCompleting}>
-                  {autoCompleting ? (autoCompleteStatus||"⏳ Completo il mazzo…") : "🔧 Completa mazzo"}
+                <button style={{...S.btnP,width:"100%",padding:13}} onClick={autoFixDeck} disabled={autoCompleting}>
+                  {autoCompleting ? (autoCompleteStatus||"⏳ Sistemo il mazzo…") : (isOver ? "✂️ Riduci a 100" : "🔧 Completa mazzo")}
                 </button>
               </div>
             </div>
-          )}
+            );})()}
           {showDeckStrategy && currentDeck && (
             <div style={S.modalOverlay} onClick={()=>setShowDeckStrategy(false)}>
               <div style={{...S.modalBox, maxHeight:"85vh", overflowY:"auto"}} onClick={e=>e.stopPropagation()} className="fade-in">
@@ -3718,7 +3817,7 @@
                       </button>
                       <button style={S.toolbarBtn} onClick={()=>explainDeckStrategy(false)}>📖 Come si gioca</button>
                       {currentDeck.format==="Commander" && (
-                        <button style={S.toolbarBtn} onClick={()=>setShowAutoComplete(true)}>🔧 Completa mazzo</button>
+                        <button style={S.toolbarBtn} onClick={()=>setShowAutoComplete(true)}>🔧 Sistema mazzo</button>
                       )}
                       <div style={{...S.viewToggle,marginLeft:"auto"}}>
                         <button style={{...S.viewBtn,...(deckViewMode==="list"?S.viewBtnOn:{})}} onClick={()=>setDeckViewMode("list")}>☰</button>
@@ -3801,15 +3900,15 @@
                           const rest = filtered.filter(c=>!c.isCommander);
                           const groups = groupDeckCards(rest, deckGroupBy);
 
-                          const renderListCard = card => (
+                          const renderListCard = card => {
+                            const isOwned = card.owned===undefined ? true : card.owned;
+                            return (
                             <div key={card.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #1e1b2e",...(card.isCommander?{background:"#241a08",borderRadius:6,paddingLeft:6}:{})}}>
                               <span style={{color:"#f59e0b",fontWeight:700,width:20,fontSize:12}}>{card.qty||1}×</span>
-                              {card.owned!==undefined && (
-                                <span title={card.owned?"Posseduta":`Possiedi ${card.ownedQty||0} su ${card.qty||1} necessarie`} style={{fontSize:11,display:"flex",alignItems:"center",gap:3}}>
-                                  {card.owned?"✅":"❌"}
-                                  {!card.owned && <span style={{fontSize:9,color:"#64748b"}}>({card.ownedQty||0}/{card.qty||1})</span>}
-                                </span>
-                              )}
+                              <span title={isOwned?"Posseduta":`Possiedi ${card.ownedQty||0} su ${card.qty||1} necessarie`} style={{fontSize:11,display:"flex",alignItems:"center",gap:3}}>
+                                {isOwned?"✅":"❌"}
+                                {!isOwned && <span style={{fontSize:9,color:"#64748b"}}>({card.ownedQty||0}/{card.qty||1})</span>}
+                              </span>
                               {card.isCommander && <span title="Comandante" style={{fontSize:13}}>👑</span>}
                               <span style={{flex:1,fontSize:12,fontWeight:card.isCommander?700:400,cursor:"pointer"}} onClick={()=>setDeckCardPopup(card)}>{card.printed_name || card.name}</span>
                               <span style={{fontSize:10,color:"#64748b",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{card.type?.split("—")[0]}</span>
@@ -3817,19 +3916,21 @@
                                 <button style={{...S.btnMini,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} title={card.isCommander?"Togli il ruolo di comandante":"Designa come comandante"} onClick={()=>toggleCommander(currentDeck.id,card.id)}>👑</button>
                               )}
                             </div>
-                          );
-                          const renderGridCard = card => (
+                          );};
+                          const renderGridCard = card => {
+                            const isOwned = card.owned===undefined ? true : card.owned;
+                            return (
                             <div key={card.id} style={{...S.miniTile,...(card.isCommander?{border:"2px solid #f59e0b"}:{})}}>
                               <div onClick={()=>setDeckCardPopup(card)} style={{cursor:"pointer"}}>
                                 {card.image ? <img src={card.image} alt={card.name} style={S.miniImg}/> : <div style={S.miniNoImg}>{card.printed_name||card.name}</div>}
                               </div>
                               {card.isCommander && <span style={{...S.miniQty,left:"auto",right:4,background:"#f59e0b",color:"#0a0a0f"}}>👑</span>}
-                              <span style={S.miniQty}>{card.qty||1}×{card.owned!==undefined ? (card.owned?" ✅":` ❌ (${card.ownedQty||0}/${card.qty||1})`) : ""}</span>
+                              <span style={S.miniQty}>{card.qty||1}×{isOwned?" ✅":` ❌ (${card.ownedQty||0}/${card.qty||1})`}</span>
                               {currentDeck.format==="Commander" && canBeCommander(card) && (
                                 <button style={{...S.miniBtn,...(card.isCommander?{background:"#f59e0b",color:"#0a0a0f"}:{})}} onClick={()=>toggleCommander(currentDeck.id,card.id)}>{card.isCommander?"👑 Comandante ✕":"👑 Rendi comandante"}</button>
                               )}
                             </div>
-                          );
+                          );};
 
                           return (
                             <>
