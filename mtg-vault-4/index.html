@@ -1292,13 +1292,24 @@
           for (const c of cardsToCheck) {
             const sc = (c.scryfallId && idMap[c.scryfallId]) || resolvedByCardId[c.id];
             if (!sc) { notFound.push(c.printed_name||c.name); updatedCards.push(c); continue; }
+            // Scryfall non registra mai un prezzo sulle stampe non in inglese — se la carta è in
+            // un'altra lingua e non ha prezzo proprio, "prendiamo in prestito" quello della stampa
+            // inglese dello stesso set/numero (stessa logica già usata in fase di ricerca carte).
+            let prices = sc.prices||{};
+            const hasNoPrice = !prices.usd && !prices.eur && !prices.usd_foil && !prices.eur_foil;
+            if (sc.lang && sc.lang!=="en" && hasNoPrice && sc.set && sc.collector_number) {
+              try {
+                const enRes = await fetch(`https://api.scryfall.com/cards/${encodeURIComponent(sc.set)}/${encodeURIComponent(sc.collector_number)}`);
+                if (enRes.ok) { const enCard = await enRes.json(); if (enCard?.prices) prices = enCard.prices; }
+              } catch {}
+            }
             const refreshed = {
               ...c, scryfallId: sc.id, printed_name: sc.printed_name||c.printed_name||null,
               set: sc.set_name, setCode: sc.set, collectorNumber: sc.collector_number, rarity: sc.rarity,
               manaCost: sc.mana_cost||sc.card_faces?.[0]?.mana_cost||"",
               colors: (sc.colors?.length?sc.colors:sc.card_faces?.[0]?.colors)||[],
               colorIdentity: sc.color_identity||[], oracleText: sc.oracle_text||sc.card_faces?.[0]?.oracle_text||"",
-              type: sc.type_line||"", legalities: sc.legalities||{}, prices: sc.prices||{},
+              type: sc.type_line||"", legalities: sc.legalities||{}, prices,
               image: cardImage(sc)||c.image, artCrop: cardArtCrop(sc)||c.artCrop||null,
             };
             updatedCards.push(refreshed);
