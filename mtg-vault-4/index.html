@@ -1249,33 +1249,48 @@
         let updated = 0, notFound = [];
         try {
           const cardsToCheck = [...collection];
-          const identifiers = cardsToCheck.map(c => c.scryfallId ? {id:c.scryfallId} : {name:c.name});
-          const chunks = []; for (let i=0;i<identifiers.length;i+=75) chunks.push(identifiers.slice(i,i+75));
-          const scryMap = {};
-          for (let i=0;i<chunks.length;i++) {
-            setRefreshProgress(`🔍 Controllo lotto ${i+1}/${chunks.length}…`);
+          // Risoluzione per ID (precisa e senza rischio di ambiguità): un solo giro a lotti
+          const idCards = cardsToCheck.filter(c=>c.scryfallId);
+          const idMap = {};
+          const idChunks = []; for (let i=0;i<idCards.length;i+=75) idChunks.push(idCards.slice(i,i+75));
+          for (let i=0;i<idChunks.length;i++) {
+            setRefreshProgress(`🔍 Controllo per ID, lotto ${i+1}/${idChunks.length}…`);
             try {
               const res = await fetch("https://api.scryfall.com/cards/collection", {
-                method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ identifiers: chunks[i] })
+                method:"POST", headers:{"Content-Type":"application/json"},
+                body: JSON.stringify({ identifiers: idChunks[i].map(c=>({id:c.scryfallId})) })
               });
-              if (res.ok) { const dd = await res.json(); (dd.data||[]).forEach(sc => { scryMap[sc.id] = sc; scryMap[sc.name.toLowerCase()] = sc; }); }
+              if (res.ok) { const dd = await res.json(); (dd.data||[]).forEach(sc => { idMap[sc.id] = sc; }); }
             } catch {}
           }
-          // Fuzzy di riserva per le carte non trovate con la ricerca esatta (nomi imprecisi,
-          // o inserite a mano con una grafia leggermente diversa da quella ufficiale)
-          const stillMissing = cardsToCheck.filter(c => !(c.scryfallId && scryMap[c.scryfallId]) && !scryMap[c.name.toLowerCase()]);
-          for (let i=0;i<stillMissing.length;i++) {
-            setRefreshProgress(`🔍 Cerco corrispondenze approssimative (${i+1}/${stillMissing.length})…`);
+          // Per le carte senza corrispondenza per ID (mancante, o non trovata su Scryfall),
+          // risolviamo UNA ALLA VOLTA — se conosciamo set+numero, cerchiamo ESATTAMENTE quella
+          // stampa (mai "una carta con questo nome", per non rischiare di scambiare l'illustrazione,
+          // come successo con le terre base nella versione precedente); solo come ultima risorsa
+          // si cerca per nome (fuzzy), quando non abbiamo alcun altro dato identificativo.
+          const needsIndividualLookup = cardsToCheck.filter(c => !(c.scryfallId && idMap[c.scryfallId]));
+          const resolvedByCardId = {};
+          for (let i=0;i<needsIndividualLookup.length;i++) {
+            const c = needsIndividualLookup[i];
+            setRefreshProgress(`🔍 Verifico stampe esatte (${i+1}/${needsIndividualLookup.length})…`);
             try {
-              const r = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(stillMissing[i].name)}`);
-              if (r.ok) { const sc = await r.json(); if (sc?.name) scryMap[stillMissing[i].id] = sc; }
+              let sc = null;
+              if (c.setCode && c.collectorNumber) {
+                const r = await fetch(`https://api.scryfall.com/cards/${encodeURIComponent(c.setCode.toLowerCase())}/${encodeURIComponent(c.collectorNumber)}`);
+                if (r.ok) sc = await r.json();
+              }
+              if (!sc) {
+                const r2 = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(c.name)}`);
+                if (r2.ok) sc = await r2.json();
+              }
+              if (sc?.id) resolvedByCardId[c.id] = sc;
             } catch {}
           }
 
           setRefreshProgress("💾 Aggiorno i dati…");
           const updatedCards = [];
           for (const c of cardsToCheck) {
-            const sc = (c.scryfallId && scryMap[c.scryfallId]) || scryMap[c.name.toLowerCase()] || scryMap[c.id];
+            const sc = (c.scryfallId && idMap[c.scryfallId]) || resolvedByCardId[c.id];
             if (!sc) { notFound.push(c.printed_name||c.name); updatedCards.push(c); continue; }
             const refreshed = {
               ...c, scryfallId: sc.id, printed_name: sc.printed_name||c.printed_name||null,
