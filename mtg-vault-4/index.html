@@ -432,9 +432,27 @@
       const distinctColorSymbols = new Set((text.match(/add.*?\{([wubrg])\}/gi)||[]).map(m=>m.slice(-2,-1).toLowerCase()));
       return distinctColorSymbols.size >= 3;
     }
+    // Terre "fetch" (es. Windswept Heath, Misty Rainforest): cercano nel mazzo una carta con un
+    // tipo di terra base specifico (Pianura, Isola, ecc.). Se NESSUNO dei tipi che possono cercare
+    // corrisponde ai colori del comandante, la terra non troverà mai nulla di utile — è morta per
+    // questo mazzo specifico, anche se resta legale e utile in un mazzo con i colori giusti.
+    const BASIC_TYPE_TO_COLOR = { plains:"W", island:"U", swamp:"B", mountain:"R", forest:"G" };
+    function fetchedBasicColors(row) {
+      const text = (row.oracle_text||row.oracleText||"").toLowerCase();
+      if (!text.includes("search your library")) return null;
+      const found = new Set();
+      Object.entries(BASIC_TYPE_TO_COLOR).forEach(([type,color]) => { if (text.includes(type)) found.add(color); });
+      return found.size ? found : null;
+    }
     function scoreLandCard(row, identityColors) {
       let score = (row.power_level ?? 3) * 2 + (row.is_staple ? 2 : 0);
       if ((identityColors?.length||0) <= 1 && isMulticolorFixingLand(row)) score -= 6;
+      const fetchable = fetchedBasicColors(row);
+      if (fetchable) {
+        const idSet = new Set(identityColors||[]);
+        const hasUsefulTarget = [...fetchable].some(c => idSet.has(c));
+        if (!hasUsefulTarget) score -= 8; // non può mai trovare un tipo di terra utile in questo mazzo
+      }
       return score;
     }
     // Interroga card_catalog su Supabase: solo carte con identità cromatica
