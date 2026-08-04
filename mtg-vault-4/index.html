@@ -2532,7 +2532,10 @@
 
       // Estrae il contenuto di una sezione **Titolo** dal testo generato dall'IA
       function extractAiSection(text, header) {
-        const re = new RegExp("\\*\\*"+header+"\\*\\*([\\s\\S]*?)(\\n\\*\\*|$)");
+        // Tollera un ":" o spazi extra subito dopo l'intestazione (es. "**Lista mazzo:**" o
+        // "**Lista mazzo** ") — senza questa tolleranza la sezione risultava vuota per un
+        // formato altrimenti valido, facendo credere erroneamente "0 carte trovate".
+        const re = new RegExp("\\*\\*"+header+"\\*\\*:?\\s*([\\s\\S]*?)(\\n\\*\\*|$)");
         const m = text.match(re);
         return m ? m[1] : "";
       }
