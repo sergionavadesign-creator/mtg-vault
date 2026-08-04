@@ -420,16 +420,47 @@
       const cmcScore = profile.cmcBonus(row.cmc, eligibleForCmc);
       return categoryScore + powerScore + cmcScore;
     }
+    // Terre come City of Brass o Mana Confluence hanno identità cromatica incolore per
+    // regolamento (producono mana "di qualsiasi colore" in linguaggio naturale, non con
+    // simboli colorati stampati) — sono perfettamente legali in un mazzo mono-colore, ma lì
+    // il loro fixing multicolore non serve a nulla e spesso costano vita/tempo senza
+    // contropartita. Le riconosciamo dal testo e ne scontiamo il punteggio quando l'identità
+    // del comandante ha un solo colore.
+    function isMulticolorFixingLand(row) {
+      const text = (row.oracle_text||row.oracleText||"").toLowerCase();
+      if (/add (one mana of any color|a mana of any color|one of any color)/.test(text)) return true;
+      const distinctColorSymbols = new Set((text.match(/add.*?\{([wubrg])\}/gi)||[]).map(m=>m.slice(-2,-1).toLowerCase()));
+      return distinctColorSymbols.size >= 3;
+    }
+    function scoreLandCard(row, identityColors) {
+      let score = (row.power_level ?? 3) * 2 + (row.is_staple ? 2 : 0);
+      if ((identityColors?.length||0) <= 1 && isMulticolorFixingLand(row)) score -= 6;
+      return score;
+    }
     // Interroga card_catalog su Supabase: solo carte con identità cromatica
-    // sottoinsieme di quella richiesta (operatore "contained by" di PostgREST)
-    async function fetchCardCatalogByIdentity(identityColors) {
+    // sottoinsieme di quella richiesta (operatore "contained by" di PostgREST).
+    // Supabase/PostgREST limita SILENZIOSAMENTE ogni risposta a un massimo di ~1000 righe
+    // (db-max-rows lato server), indipendentemente dal `limit` chiesto dal client — senza
+    // errore, senza avviso. Per non pescare da una fetta arbitraria del pool reale (che per
+    // un'identità mono-colore può superare le 7.000 righe), paginiamo esplicitamente con
+    // `offset` finché una pagina non torna più corta della dimensione richiesta.
+    async function fetchCardCatalogByIdentity(identityColors, onProgress) {
       const idLiteral = `{${identityColors.join(",")}}`;
       const cols = "scryfall_id,oracle_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,power,toughness,legalities,prices,image_uris,is_staple,primary_category,secondary_categories,power_level,synergy_tags";
-      const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&color_identity=cd.${encodeURIComponent(idLiteral)}&limit=8000`;
-      const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
-      if (!res.ok) throw new Error("Impossibile leggere il database carte (card_catalog) — verifica che la policy di lettura sia stata attivata su Supabase.");
-      const rows = await res.json();
-      return rows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
+      const PAGE_SIZE = 1000;
+      let allRows = [], offset = 0, page = 1;
+      while (true) {
+        if (onProgress) onProgress(page, allRows.length);
+        const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&color_identity=cd.${encodeURIComponent(idLiteral)}&order=power_level.desc,is_staple.desc&limit=${PAGE_SIZE}&offset=${offset}`;
+        const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
+        if (!res.ok) throw new Error("Impossibile leggere il database carte (card_catalog) — verifica che la policy di lettura sia stata attivata su Supabase.");
+        const chunk = await res.json();
+        allRows = allRows.concat(chunk);
+        if (chunk.length < PAGE_SIZE) break; // ultima pagina raggiunta
+        offset += PAGE_SIZE; page++;
+        if (offset > 30000) break; // paracadute di sicurezza, non dovrebbe mai servire
+      }
+      return allRows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
     }
 
     function getGroupKey(card, groupBy) {
@@ -2017,7 +2048,7 @@
           const landCount = Math.min(41, Math.max(28, Math.round(analysis.landCount || 37)));
 
           setEngineStatus("📚 Interrogo il database carte…");
-          const pool = await fetchCardCatalogByIdentity(identity);
+          const pool = await fetchCardCatalogByIdentity(identity, (page,soFar)=>setEngineStatus(`📚 Interrogo il database carte… (pagina ${page}, ${soFar} carte lette)`));
 
           const profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
           const boosts = analysis.categoryBoosts || {};
@@ -2051,7 +2082,7 @@
           setEngineStatus("⚖️ Calcolo il punteggio delle carte…");
           const scoreSort = (list, scoreFn) => list.map(r => ({ row:r, score: scoreFn(r) })).sort((a,b)=>b.score-a.score);
           const nonLandScoreFn = r => scoreCatalogCard(r, effectiveProfile);
-          const landScoreFn = r => (r.power_level??3)*2 + (r.is_staple?2:0);
+          const landScoreFn = r => scoreLandCard(r, identity);
 
           let scoredNonLands, scoredLands;
           if (buildSource === "collection") {
@@ -2196,7 +2227,7 @@
             pool = rows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
           } else {
             const cols = "scryfall_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,legalities,prices,image_uris,primary_category,secondary_categories,power_level";
-            const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&type_line=ilike.*Legendary*&type_line=ilike.*Creature*&legalities->>commander=eq.legal&limit=3000`;
+            const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&type_line=ilike.*Legendary*&type_line=ilike.*Creature*&legalities->>commander=eq.legal&order=power_level.desc,is_staple.desc&limit=3000`;
             const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
             const rows = res.ok ? await res.json() : [];
             pool = rows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
@@ -2279,7 +2310,7 @@
           if (currentTotal < 100) {
             // ── AGGIUNGI le carte mancanti ──────────────────────────────
             setAutoCompleteStatus("📚 Interrogo il database carte…");
-            const pool = await fetchCardCatalogByIdentity(identity);
+            const pool = await fetchCardCatalogByIdentity(identity, (page,soFar)=>setAutoCompleteStatus(`📚 Interrogo il database carte… (pagina ${page}, ${soFar} carte lette)`));
             const alreadyUsedNames = new Set([canonicalCardName(commander.name), ...existingCards.map(c=>canonicalCardName(c.name))]);
             const currentLandCount = existingCards.filter(isLandType).reduce((s,c)=>s+(c.qty||1),0);
             const landsStillNeeded = Math.max(0, targetLandCount - currentLandCount);
@@ -2295,8 +2326,8 @@
               ? [...scoreSort(candidates.filter(isOwned), r=>scoreCatalogCard(r,effectiveProfile)), ...scoreSort(candidates.filter(r=>!isOwned(r)), r=>scoreCatalogCard(r,effectiveProfile))]
               : scoreSort(candidates, r=>scoreCatalogCard(r,effectiveProfile));
             const scoredLands = autoCompleteSource==="collection"
-              ? [...scoreSort(landCandidates.filter(isOwned), r=>(r.power_level??3)*2+(r.is_staple?2:0)), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), r=>(r.power_level??3)*2+(r.is_staple?2:0))]
-              : scoreSort(landCandidates, r=>(r.power_level??3)*2+(r.is_staple?2:0));
+              ? [...scoreSort(landCandidates.filter(isOwned), r=>scoreLandCard(r,identity)), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), r=>scoreLandCard(r,identity))]
+              : scoreSort(landCandidates, r=>scoreLandCard(r,identity));
 
             const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
             const newlyUsed = new Set(alreadyUsedNames);
@@ -2349,7 +2380,7 @@
             const tagByName = {};
             for (const chunk of chunks) {
               const namesList = chunk.map(n => `"${n.replace(/"/g,'\\"')}"`).join(",");
-              const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=name,primary_category,secondary_categories,power_level,is_staple&name=in.(${encodeURIComponent(namesList)})`;
+              const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=name,type_line,oracle_text,primary_category,secondary_categories,power_level,is_staple&name=in.(${encodeURIComponent(namesList)})`;
               try {
                 const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
                 if (res.ok) { const rows = await res.json(); rows.forEach(r => { tagByName[canonicalCardName(r.name)] = r; }); }
@@ -2358,7 +2389,7 @@
             setAutoCompleteStatus("⚖️ Valuto quali carte tagliare…");
             function scoreExisting(card, isLand) {
               const tag = tagByName[canonicalCardName(card.name)] || {};
-              const base = isLand ? (tag.power_level??3)*2+(tag.is_staple?2:0) : scoreCatalogCard({ ...tag, cmc: computeCmc(card.manaCost) }, effectiveProfile);
+              const base = isLand ? scoreLandCard(tag, identity) : scoreCatalogCard({ ...tag, cmc: computeCmc(card.manaCost) }, effectiveProfile);
               // In modalità "solo collezione" diamo un piccolo vantaggio alle carte possedute,
               // così a parità di forza si tagliano prima quelle che NON hai
               return autoCompleteSource==="collection" ? base + (isOwned(card)?1.5:0) : base;
