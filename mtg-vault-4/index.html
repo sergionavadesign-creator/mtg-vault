@@ -471,7 +471,11 @@
         if (onProgress) onProgress(page, allRows.length);
         const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&color_identity=cd.${encodeURIComponent(idLiteral)}&order=power_level.desc,is_staple.desc&limit=${PAGE_SIZE}&offset=${offset}`;
         const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
-        if (!res.ok) throw new Error("Impossibile leggere il database carte (card_catalog) — verifica che la policy di lettura sia stata attivata su Supabase.");
+        if (!res.ok) {
+          let detail = "";
+          try { detail = await res.text(); } catch {}
+          throw new Error(`Impossibile leggere il database carte (card_catalog) — HTTP ${res.status}: ${detail.slice(0,300) || "nessun dettaglio restituito da Supabase"}`);
+        }
         const chunk = await res.json();
         allRows = allRows.concat(chunk);
         if (chunk.length < PAGE_SIZE) break; // ultima pagina raggiunta
