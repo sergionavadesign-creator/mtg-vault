@@ -1824,6 +1824,8 @@
         guardedDeckAction(deck, { type:"toggleCommander", cardId });
       }
       async function handleDeleteDeck(deckId) {
+        const deck = data.decks.find(d => d.id===deckId);
+        if (!confirm(`Eliminare il mazzo "${deck?.name||"questo mazzo"}"? L'operazione non si può annullare.`)) return;
         await deleteDeck(deckId);
         persist({ ...data, decks: data.decks.filter(d => d.id!==deckId) });
         if (activeDeck===deckId) { setActiveDeck(null); setDeckView("list"); }
