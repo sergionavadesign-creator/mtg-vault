@@ -4,6 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0a0a0f" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="MyMagic" />
   <title>MyMagic</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
@@ -448,16 +454,15 @@
     // il loro fixing multicolore non serve a nulla e spesso costano vita/tempo senza
     // contropartita. Le riconosciamo dal testo e ne scontiamo il punteggio quando l'identità
     // del comandante ha un solo colore.
+    // Euristiche di riserva, usate SOLO se una riga non ha ancora i campi arricchiti
+    // (produces_colors/mana_costs_life/fetches_basic_types) — es. dati non ancora
+    // aggiornati in cache. Il segnale primario ora sono i campi veri, non il testo indovinato.
     function isMulticolorFixingLand(row) {
       const text = (row.oracle_text||row.oracleText||"").toLowerCase();
       if (/add (one mana of any color|a mana of any color|one of any color)/.test(text)) return true;
       const distinctColorSymbols = new Set((text.match(/add.*?\{([wubrg])\}/gi)||[]).map(m=>m.slice(-2,-1).toLowerCase()));
       return distinctColorSymbols.size >= 3;
     }
-    // Terre "fetch" (es. Windswept Heath, Misty Rainforest): cercano nel mazzo una carta con un
-    // tipo di terra base specifico (Pianura, Isola, ecc.). Se NESSUNO dei tipi che possono cercare
-    // corrisponde ai colori del comandante, la terra non troverà mai nulla di utile — è morta per
-    // questo mazzo specifico, anche se resta legale e utile in un mazzo con i colori giusti.
     const BASIC_TYPE_TO_COLOR = { plains:"W", island:"U", swamp:"B", mountain:"R", forest:"G" };
     function fetchedBasicColors(row) {
       const text = (row.oracle_text||row.oracleText||"").toLowerCase();
@@ -468,12 +473,25 @@
     }
     function scoreLandCard(row, identityColors) {
       let score = (row.power_level ?? 3) * 2 + (row.is_staple ? 2 : 0);
-      if ((identityColors?.length||0) <= 1 && isMulticolorFixingLand(row)) score -= 6;
-      const fetchable = fetchedBasicColors(row);
-      if (fetchable) {
-        const idSet = new Set(identityColors||[]);
-        const hasUsefulTarget = [...fetchable].some(c => idSet.has(c));
-        if (!hasUsefulTarget) score -= 15; // non può mai trovare un tipo di terra utile in questo mazzo: deve perdere sempre contro qualunque alternativa vera
+      const idSet = new Set(identityColors||[]);
+      const hasEnrichedData = row.mana_costs_life !== undefined && row.fetches_basic_types !== undefined;
+
+      if (hasEnrichedData) {
+        // Penalità solo se il fixing ha davvero un costo (es. City of Brass) — una terra che
+        // produce "qualsiasi colore" gratis (es. Command Tower) in mono-colore non è dannosa,
+        // è solo equivalente a una base: nessuna penalità per lei.
+        if ((identityColors?.length||0) <= 1 && row.mana_costs_life === true) score -= 6;
+        if (row.fetches_basic_types && row.fetches_basic_types.length) {
+          const hasUsefulTarget = row.fetches_basic_types.some(t => idSet.has(BASIC_TYPE_TO_COLOR[(t||"").toLowerCase()]));
+          if (!hasUsefulTarget) score -= 15;
+        }
+      } else {
+        if ((identityColors?.length||0) <= 1 && isMulticolorFixingLand(row)) score -= 6;
+        const fetchable = fetchedBasicColors(row);
+        if (fetchable) {
+          const hasUsefulTarget = [...fetchable].some(c => idSet.has(c));
+          if (!hasUsefulTarget) score -= 15;
+        }
       }
       return score;
     }
@@ -486,7 +504,7 @@
     // `offset` finché una pagina non torna più corta della dimensione richiesta.
     async function fetchCardCatalogByIdentity(identityColors, onProgress) {
       const idLiteral = `{${identityColors.join(",")}}`;
-      const cols = "scryfall_id,oracle_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,power,toughness,legalities,prices,image_uris,is_staple,primary_category,secondary_categories,power_level,synergy_tags";
+      const cols = "scryfall_id,oracle_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,power,toughness,legalities,prices,image_uris,is_staple,primary_category,secondary_categories,power_level,synergy_tags,produces_colors,mana_costs_life,fetches_basic_types";
       const PAGE_SIZE = 1000;
       let allRows = [], offset = 0, page = 1;
       while (true) {
@@ -1116,9 +1134,9 @@
           for (const chunk of chunks) {
             const namesList = chunk.map(n => `"${n.replace(/"/g,'\\"')}"`).join(",");
             try {
-              const res = await fetch(`${SUPABASE_URL}/rest/v1/card_catalog?select=name,primary_category&name=in.(${encodeURIComponent(namesList)})`,
+              const res = await fetch(`${SUPABASE_URL}/rest/v1/card_catalog?select=name,primary_category,power_level&name=in.(${encodeURIComponent(namesList)})`,
                 { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
-              if (res.ok) { const rows = await res.json(); rows.forEach(r => { map[canonicalCardName(r.name)] = r.primary_category; }); }
+              if (res.ok) { const rows = await res.json(); rows.forEach(r => { map[canonicalCardName(r.name)] = { primary_category: r.primary_category, power_level: r.power_level }; }); }
             } catch {}
           }
           if (!cancelled) { setCatTags(map); setCatLoading(false); }
@@ -1130,11 +1148,40 @@
       const FUNCTIONAL_CATS = ["Ramp","Card Draw","Removal","Board Wipe","Counterspell","Recursion","Stax/Disruption","Tutor","Protection"];
       const catCount = {};
       cards.forEach(c => {
-        const cat = catTags[canonicalCardName(c.name)];
-        if (cat && FUNCTIONAL_CATS.includes(cat)) catCount[cat] = (catCount[cat]||0) + (c.qty||1);
+        const tag = catTags[canonicalCardName(c.name)];
+        if (tag?.primary_category && FUNCTIONAL_CATS.includes(tag.primary_category)) catCount[tag.primary_category] = (catCount[tag.primary_category]||0) + (c.qty||1);
       });
       const catEntries = FUNCTIONAL_CATS.map(k=>[k,catCount[k]||0]).filter(([,n])=>n>0);
       const maxCat = Math.max(1, ...catEntries.map(([,n])=>n));
+
+      // Stima approssimativa della fascia di potenza, allineata ai NOMI ufficiali delle 5
+      // fasce Wizards (Exhibition/Core/Upgraded/Optimized/cEDH) — ma calcolata dai dati che
+      // abbiamo (potenza media delle carte, quota di carte di punta, curva), NON dal conteggio
+      // ufficiale delle "Game Changer" o dall'analisi di combo, che richiederebbero altri dati.
+      // Va presentata sempre come stima, mai come giudizio definitivo.
+      const nonLandForBracket = cards.filter(c => !(c.type||"").toLowerCase().includes("land") && !c.isCommander);
+      let bracketEstimate = null;
+      if (!catLoading && nonLandForBracket.length>0) {
+        let totalPower=0, count=0, highPowerCount=0, totalCmc=0;
+        nonLandForBracket.forEach(c => {
+          const tag = catTags[canonicalCardName(c.name)];
+          const pl = tag?.power_level ?? 3;
+          totalPower += pl*(c.qty||1); count += (c.qty||1);
+          if (pl>=5) highPowerCount += (c.qty||1);
+          totalCmc += computeCmc(c.manaCost)*(c.qty||1);
+        });
+        const avgPower = totalPower/count, highPowerRatio = highPowerCount/count, avgCmc = totalCmc/count;
+        const score = avgPower*2 + highPowerRatio*10 - avgCmc*0.4;
+        const BRACKETS = [
+          { max:6.5,  n:1, label:"Exhibition", desc:"Mazzo tematico, giochi lunghi (9+ turni)" },
+          { max:8.5,  n:2, label:"Core", desc:"Livello precostruito, giochi da 8+ turni" },
+          { max:11,   n:3, label:"Upgraded", desc:"Mazzo rifinito, giochi da 6+ turni" },
+          { max:13.5, n:4, label:"Optimized", desc:"Nessuna restrizione, giochi da 4+ turni" },
+          { max:Infinity, n:5, label:"cEDH", desc:"Competitivo puro, qualunque turno" },
+        ];
+        const match = BRACKETS.find(b=>score<b.max) || BRACKETS[BRACKETS.length-1];
+        bracketEstimate = { ...match, score, avgPower, highPowerRatio, avgCmc };
+      }
 
       const nonLands = cards.filter(c => !(c.type||"").toLowerCase().includes("land"));
       const buckets = [0,1,2,3,4,5,6,"7+"];
@@ -1161,6 +1208,16 @@
 
       return (
         <div className="fade-in">
+          {bracketEstimate && (
+            <div style={{background:"#0e0c16",borderRadius:10,padding:"14px 16px",marginBottom:14,border:"1px solid #2d2b3e"}}>
+              <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4}}>
+                <span style={{fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.5px"}}>Fascia stimata</span>
+                <span style={{fontSize:9,color:"#4a4570"}}>(stima, non il conteggio ufficiale Wizards)</span>
+              </div>
+              <div style={{fontSize:20,fontWeight:800,color:"#f59e0b"}}>Bracket {bracketEstimate.n} — {bracketEstimate.label}</div>
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{bracketEstimate.desc}</div>
+            </div>
+          )}
           <div style={{display:"flex",gap:10,marginBottom:16}}>
             <div style={{flex:1,background:"#0e0c16",borderRadius:8,padding:"10px 12px"}}>
               <div style={{fontSize:20,fontWeight:800}}>{landCount}</div>
@@ -2697,7 +2754,7 @@
             const tagByName = {};
             for (const chunk of chunks) {
               const namesList = chunk.map(n => `"${n.replace(/"/g,'\\"')}"`).join(",");
-              const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=name,type_line,oracle_text,primary_category,secondary_categories,power_level,is_staple&name=in.(${encodeURIComponent(namesList)})`;
+              const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=name,type_line,oracle_text,primary_category,secondary_categories,power_level,is_staple,produces_colors,mana_costs_life,fetches_basic_types&name=in.(${encodeURIComponent(namesList)})`;
               try {
                 const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
                 if (res.ok) { const rows = await res.json(); rows.forEach(r => { tagByName[canonicalCardName(r.name)] = r; }); }
@@ -5475,6 +5532,14 @@
     };
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+
+    // Registra il service worker per l'installabilità PWA (icona in home,
+    // apertura a schermo intero). Non blocca né rallenta il render dell'app.
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch(() => {});
+      });
+    }
   </script>
 </body>
 </html>
