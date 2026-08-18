@@ -502,6 +502,12 @@
     // errore, senza avviso. Per non pescare da una fetta arbitraria del pool reale (che per
     // un'identità mono-colore può superare le 7.000 righe), paginiamo esplicitamente con
     // `offset` finché una pagina non torna più corta della dimensione richiesta.
+    // NIENTE `order=` qui: un ORDER BY su tutta la tabella filtrata costringe Postgres a un
+    // ordinamento completo prima di restituire anche solo la prima pagina — con identità ampie
+    // (es. un comandante a 4-5 colori, che può includere quasi tutte le ~32.000 righe) questo
+    // ha causato un timeout reale (HTTP 500, "statement timeout"). Non serve comunque: dato che
+    // paginiamo fino in fondo, otteniamo sempre TUTTE le righe indipendentemente dall'ordine in
+    // cui arrivano, e ogni funzione che le usa le riordina già da sola in base al punteggio.
     async function fetchCardCatalogByIdentity(identityColors, onProgress) {
       const idLiteral = `{${identityColors.join(",")}}`;
       const cols = "scryfall_id,oracle_id,name,printed_name,set_code,set_name,mana_cost,cmc,colors,color_identity,type_line,oracle_text,power,toughness,legalities,prices,image_uris,is_staple,primary_category,secondary_categories,power_level,synergy_tags,produces_colors,mana_costs_life,fetches_basic_types";
@@ -509,7 +515,7 @@
       let allRows = [], offset = 0, page = 1;
       while (true) {
         if (onProgress) onProgress(page, allRows.length);
-        const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&color_identity=cd.${encodeURIComponent(idLiteral)}&order=power_level.desc,is_staple.desc&limit=${PAGE_SIZE}&offset=${offset}`;
+        const url = `${SUPABASE_URL}/rest/v1/card_catalog?select=${cols}&color_identity=cd.${encodeURIComponent(idLiteral)}&limit=${PAGE_SIZE}&offset=${offset}`;
         const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
         if (!res.ok) {
           let detail = "";
@@ -520,7 +526,10 @@
         allRows = allRows.concat(chunk);
         if (chunk.length < PAGE_SIZE) break; // ultima pagina raggiunta
         offset += PAGE_SIZE; page++;
-        if (offset > 30000) break; // paracadute di sicurezza, non dovrebbe mai servire
+        // Paracadute ben sopra la dimensione reale della tabella (~32.000 righe), così anche
+        // un'identità a 5 colori (che può includere quasi tutto il catalogo) non viene mai
+        // troncata per errore — prima era a 30.000, troppo vicino al totale reale.
+        if (offset > 50000) break;
       }
       return allRows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
     }
