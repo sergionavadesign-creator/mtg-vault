@@ -1129,6 +1129,9 @@
     function DeckStatsPanel({ cards }) {
       const [catTags, setCatTags] = useState({}); // nome carta (canonico) -> { primary_category, ... }
       const [catLoading, setCatLoading] = useState(false);
+      const [comboCheck, setComboCheck] = useState(null); // risultato Commander Spellbook, o null se non ancora richiesto
+      const [comboChecking, setComboChecking] = useState(false);
+      const [comboError, setComboError] = useState(null);
       const lands = cards.filter(c => (c.type||"").toLowerCase().includes("land"));
       const landCount = lands.reduce((s,c)=>s+(c.qty||1),0);
 
@@ -1143,9 +1146,9 @@
           for (const chunk of chunks) {
             const namesList = chunk.map(n => `"${n.replace(/"/g,'\\"')}"`).join(",");
             try {
-              const res = await fetch(`${SUPABASE_URL}/rest/v1/card_catalog?select=name,primary_category,power_level&name=in.(${encodeURIComponent(namesList)})`,
+              const res = await fetch(`${SUPABASE_URL}/rest/v1/card_catalog?select=name,primary_category,power_level,is_game_changer&name=in.(${encodeURIComponent(namesList)})`,
                 { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } });
-              if (res.ok) { const rows = await res.json(); rows.forEach(r => { map[canonicalCardName(r.name)] = { primary_category: r.primary_category, power_level: r.power_level }; }); }
+              if (res.ok) { const rows = await res.json(); rows.forEach(r => { map[canonicalCardName(r.name)] = { primary_category: r.primary_category, power_level: r.power_level, is_game_changer: r.is_game_changer }; }); }
             } catch {}
           }
           if (!cancelled) { setCatTags(map); setCatLoading(false); }
@@ -1163,33 +1166,80 @@
       const catEntries = FUNCTIONAL_CATS.map(k=>[k,catCount[k]||0]).filter(([,n])=>n>0);
       const maxCat = Math.max(1, ...catEntries.map(([,n])=>n));
 
-      // Stima approssimativa della fascia di potenza, allineata ai NOMI ufficiali delle 5
-      // fasce Wizards (Exhibition/Core/Upgraded/Optimized/cEDH) — ma calcolata dai dati che
-      // abbiamo (potenza media delle carte, quota di carte di punta, curva), NON dal conteggio
-      // ufficiale delle "Game Changer" o dall'analisi di combo, che richiederebbero altri dati.
-      // Va presentata sempre come stima, mai come giudizio definitivo.
+      // Fascia di potenza: ora con una soglia RIGIDA vera (conteggio Game Changer reale dal
+      // nostro database, non più una stima) — coerente con come funziona davvero il sistema
+      // ufficiale Wizards (0 Game Changer per le fasce 1-2, fino a 3 per la fascia 3, senza
+      // limite dalla 4 in su). Il punteggio "soft" (potenza media, curva) serve SOLO a
+      // posizionarsi con precisione dentro l'intervallo che la soglia rigida permette — non
+      // decide più da solo la fascia. Le combo vere (da Commander Spellbook, se richieste) sono
+      // un segnale supplementare mostrato a parte, non ancora fuse in questo numero.
       const nonLandForBracket = cards.filter(c => !(c.type||"").toLowerCase().includes("land") && !c.isCommander);
       let bracketEstimate = null;
       if (!catLoading && nonLandForBracket.length>0) {
-        let totalPower=0, count=0, highPowerCount=0, totalCmc=0;
+        let totalPower=0, count=0, totalCmc=0, gameChangerCount=0;
         nonLandForBracket.forEach(c => {
           const tag = catTags[canonicalCardName(c.name)];
           const pl = tag?.power_level ?? 3;
           totalPower += pl*(c.qty||1); count += (c.qty||1);
-          if (pl>=5) highPowerCount += (c.qty||1);
           totalCmc += computeCmc(c.manaCost)*(c.qty||1);
+          if (tag?.is_game_changer) gameChangerCount += (c.qty||1);
         });
-        const avgPower = totalPower/count, highPowerRatio = highPowerCount/count, avgCmc = totalCmc/count;
-        const score = avgPower*2 + highPowerRatio*10 - avgCmc*0.4;
+        const avgPower = totalPower/count, avgCmc = totalCmc/count;
+        const softScore = avgPower*2 - avgCmc*0.4; // solo per il posizionamento fine
+
+        // Soglia rigida: il conteggio Game Changer stabilisce il RANGE di fasce ammesse
+        let allowedRange;
+        if (gameChangerCount === 0) allowedRange = [1,2];
+        else if (gameChangerCount <= 3) allowedRange = [2,3];
+        else allowedRange = [3,5];
+
         const BRACKETS = [
-          { max:6.5,  n:1, label:"Exhibition", desc:"Mazzo tematico, giochi lunghi (9+ turni)" },
-          { max:8.5,  n:2, label:"Core", desc:"Livello precostruito, giochi da 8+ turni" },
-          { max:11,   n:3, label:"Upgraded", desc:"Mazzo rifinito, giochi da 6+ turni" },
-          { max:13.5, n:4, label:"Optimized", desc:"Nessuna restrizione, giochi da 4+ turni" },
-          { max:Infinity, n:5, label:"cEDH", desc:"Competitivo puro, qualunque turno" },
+          { n:1, label:"Exhibition", desc:"Mazzo tematico, giochi lunghi (9+ turni)" },
+          { n:2, label:"Core", desc:"Livello precostruito, giochi da 8+ turni" },
+          { n:3, label:"Upgraded", desc:"Mazzo rifinito, giochi da 6+ turni" },
+          { n:4, label:"Optimized", desc:"Nessuna restrizione, giochi da 4+ turni" },
+          { n:5, label:"cEDH", desc:"Competitivo puro, qualunque turno" },
         ];
-        const match = BRACKETS.find(b=>score<b.max) || BRACKETS[BRACKETS.length-1];
-        bracketEstimate = { ...match, score, avgPower, highPowerRatio, avgCmc };
+        // Dentro il range ammesso, il punteggio soft decide la posizione esatta
+        const [minB,maxB] = allowedRange;
+        const span = maxB-minB;
+        const normalizedSoft = Math.max(0, Math.min(1, (softScore-4)/10)); // 0..1 approssimativo
+        const n = span===0 ? minB : Math.min(maxB, minB + Math.round(normalizedSoft*span));
+        const match = BRACKETS[n-1];
+        bracketEstimate = { ...match, score: softScore, avgPower, avgCmc, gameChangerCount, allowedRange };
+      }
+
+      // Verifica combo reali su Commander Spellbook — su richiesta esplicita, non automatica
+      // (chiamata a un servizio esterno, meglio non farla scattare ad ogni apertura statistiche)
+      async function checkCombosOnSpellbook() {
+        setComboChecking(true); setComboError(null);
+        try {
+          const commander = cards.find(c=>c.isCommander);
+          const nonSideboard = cards.filter(c=>!c.isSideboard && !c.isCommander);
+          let text = "";
+          if (commander) text += `Commander\n1 ${commander.name}\n\n`;
+          text += "Deck\n" + nonSideboard.map(c=>`${c.qty||1} ${c.name}`).join("\n");
+
+          const parseRes = await fetch("https://backend.commanderspellbook.com/card-list-from-text", {
+            method: "POST", headers: { "Content-Type": "text/plain" }, body: text
+          });
+          if (!parseRes.ok) throw new Error(`card-list-from-text: HTTP ${parseRes.status}`);
+          const deckList = await parseRes.json();
+
+          const bracketRes = await fetch("https://backend.commanderspellbook.com/estimate-bracket", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(deckList)
+          });
+          if (!bracketRes.ok) throw new Error(`estimate-bracket: HTTP ${bracketRes.status}`);
+          const result = await bracketRes.json();
+          setComboCheck(result);
+        } catch (e) {
+          // Se questa chiamata fallisce con un errore di rete generico (non un HTTP xxx), è
+          // molto probabile un blocco CORS (il browser impedisce la chiamata diretta a un
+          // dominio esterno) — in quel caso servirà un proxy Supabase, come già fatto per
+          // Moxfield, invece di chiamare l'API direttamente dal browser.
+          setComboError(e.message||"Errore di connessione — se il problema persiste potrebbe servire un proxy (come per Moxfield) invece della chiamata diretta.");
+        }
+        setComboChecking(false);
       }
 
       const nonLands = cards.filter(c => !(c.type||"").toLowerCase().includes("land"));
@@ -1221,12 +1271,45 @@
             <div style={{background:"#0e0c16",borderRadius:10,padding:"14px 16px",marginBottom:14,border:"1px solid #2d2b3e"}}>
               <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4}}>
                 <span style={{fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.5px"}}>Fascia stimata</span>
-                <span style={{fontSize:9,color:"#4a4570"}}>(stima, non il conteggio ufficiale Wizards)</span>
+                <span style={{fontSize:9,color:"#4a4570"}}>({bracketEstimate.gameChangerCount} Game Changer veri + punteggio di curva — non ancora combo, vedi sotto)</span>
               </div>
               <div style={{fontSize:20,fontWeight:800,color:"#f59e0b"}}>Bracket {bracketEstimate.n} — {bracketEstimate.label}</div>
               <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{bracketEstimate.desc}</div>
             </div>
           )}
+
+          <div style={{background:"#0e0c16",borderRadius:10,padding:"14px 16px",marginBottom:14,border:"1px solid #2d2b3e"}}>
+            <div style={{fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:8}}>Combo reali (Commander Spellbook)</div>
+            {!comboCheck && !comboChecking && (
+              <button style={{...S.btnP,width:"100%",padding:10,fontSize:12}} onClick={checkCombosOnSpellbook}>🔍 Cerca combo nel mazzo</button>
+            )}
+            {comboChecking && <div style={{fontSize:12,color:"#94a3b8"}}>⏳ Controllo in corso…</div>}
+            {comboError && (
+              <div style={{fontSize:11,color:"#f87171"}}>⚠️ {comboError}</div>
+            )}
+            {comboCheck && (
+              <>
+                <div style={{fontSize:12,color:"#94a3b8",marginBottom:8}}>
+                  Classificazione Commander Spellbook: <span style={{color:"#f59e0b",fontWeight:700}}>{comboCheck.bracketTag}</span>
+                  <span style={{fontSize:10,color:"#4a4570"}}> (scala propria loro, 6 fasce tematiche — non gli stessi nomi Wizards mostrati sopra)</span>
+                </div>
+                {comboCheck.combos?.length>0 ? (
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {comboCheck.combos.map((c,i)=>(
+                      <div key={i} style={{fontSize:11,color:"#cbd5e1",background:"#151220",borderRadius:6,padding:8}}>
+                        <div style={{fontWeight:700,marginBottom:2}}>{(c.combo?.produces||[]).map(p=>p.feature?.name).join(", ")||"Combo rilevata"}</div>
+                        <div style={{color:"#94a3b8"}}>{c.combo?.description?.slice(0,180)}{c.combo?.description?.length>180?"…":""}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{fontSize:11,color:"#64748b"}}>Nessuna combo nota trovata tra le carte del mazzo.</div>
+                )}
+                <button style={{...S.btnGhost,width:"100%",marginTop:8,fontSize:11}} onClick={checkCombosOnSpellbook}>🔄 Ricontrolla</button>
+              </>
+            )}
+          </div>
+
           <div style={{display:"flex",gap:10,marginBottom:16}}>
             <div style={{flex:1,background:"#0e0c16",borderRadius:8,padding:"10px 12px"}}>
               <div style={{fontSize:20,fontWeight:800}}>{landCount}</div>
