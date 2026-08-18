@@ -1,1 +1,52 @@
+name: Controllo settimanale API Scryfall
 
+# "Canarino" leggero: verifica solo che il CONTRATTO dell'API Scryfall che i
+# nostri script si aspettano sia ancora quello giusto — non controlla la
+# qualità dei dati (prezzi, legalità, ecc.), solo che i campi/endpoint da cui
+# dipendiamo esistano ancora nella forma attesa. Se qualcosa manca, il job
+# fallisce (exit code diverso da zero) e GitHub manda una notifica via email
+# a chi ha configurato il repository — nessun secret o credenziale richiesta,
+# parla solo con l'API pubblica di Scryfall.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"  # ogni lunedì alle 08:00 UTC
+  workflow_dispatch: {}   # permette anche un lancio manuale da GitHub
+
+jobs:
+  check-scryfall-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verifica campo jsonl_download_uri nel bulk-data
+        run: |
+          RESPONSE=$(curl -s -H "User-Agent: mtg-vault-canary/1.0" -H "Accept: */*" \
+            "https://api.scryfall.com/bulk-data")
+          FOUND=$(echo "$RESPONSE" | grep -o '"jsonl_download_uri"' | head -1)
+          if [ -z "$FOUND" ]; then
+            echo "::error::Il campo 'jsonl_download_uri' non è più presente nella risposta di /bulk-data — l'API potrebbe essere cambiata di nuovo (già successo il 17 agosto 2026, quando il campo si chiamava download_uri)."
+            exit 1
+          fi
+          echo "OK: jsonl_download_uri presente."
+
+      - name: Verifica campi attesi su una ricerca carte reale
+        run: |
+          RESPONSE=$(curl -s -H "User-Agent: mtg-vault-canary/1.0" -H "Accept: */*" \
+            "https://api.scryfall.com/cards/search?q=is%3Agamechanger")
+          for FIELD in '"oracle_id"' '"game_changer"' '"color_identity"' '"type_line"' '"legalities"' '"prices"'; do
+            FOUND=$(echo "$RESPONSE" | grep -o "$FIELD" | head -1)
+            if [ -z "$FOUND" ]; then
+              echo "::error::Il campo $FIELD non è più presente nella risposta di /cards/search — verifica manualmente cosa è cambiato su Scryfall prima di rilanciare gli script di tagging."
+              exit 1
+            fi
+          done
+          echo "OK: tutti i campi attesi sono presenti."
+
+      - name: Verifica conteggio Game Changer coerente
+        run: |
+          COUNT=$(curl -s -H "User-Agent: mtg-vault-canary/1.0" -H "Accept: */*" \
+            "https://api.scryfall.com/cards/search?q=is%3Agamechanger" | grep -o '"total_cards":[0-9]*' | grep -o '[0-9]*')
+          if [ -z "$COUNT" ] || [ "$COUNT" -lt 40 ] || [ "$COUNT" -gt 100 ]; then
+            echo "::error::Il numero di carte Game Changer restituito da Scryfall ($COUNT) è fuori dal range atteso (40-100) — Wizards potrebbe aver rivisto la lista in modo sostanziale, o la query è cambiata. Verifica manualmente."
+            exit 1
+          fi
+          echo "OK: $COUNT carte Game Changer trovate (dentro il range atteso)."
