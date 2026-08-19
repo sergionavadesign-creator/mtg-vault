@@ -2696,13 +2696,32 @@
       // per scegliere le 99 carte — così un comandante "da valore lento" non finisce suggerito
       // per uno stile "aggressivo" solo perché l'IA lo ricordava genericamente forte.
       async function suggestCommandersEngine() {
-        if (deckStyle === "personalizzato") {
-          alert("Il suggerimento comandanti non supporta ancora lo stile \"Personalizzato\" (richiederebbe interpretare il tuo testo libero, non ancora collegato qui). Usa 🔍 Nome o 🎲 A caso, oppure scegli uno stile preimpostato per questo suggerimento.");
+        if (deckStyle === "personalizzato" && !deckStyleDesc.trim()) {
+          alert("Scrivi prima cosa cerchi nel campo di testo (es. \"attacco letale\"), poi premi di nuovo — non c'è ancora nulla da interpretare.");
           return;
         }
         setEngineSearching(true); setEngineCommanderResults([]);
         try {
-          const profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
+          let profile;
+          if (deckStyle === "personalizzato") {
+            // Stessa logica usata per la costruzione del mazzo: nessun profilo preimpostato,
+            // i pesi vengono dall'interpretazione IA del testo libero.
+            const weightsPrompt = "Sei un esperto di Magic: The Gathering. Un giocatore vuole un comandante adatto a questa richiesta: \""+deckStyleDesc+"\".\n\n"+
+              "Rispondi SOLO con un oggetto JSON valido, nessun altro testo:\n"+
+              '{"customWeights": {"NomeCategoria": <numero 0-4>}, "prefersLowCmc": <true/false>}\n\n'+
+              "Assegna un peso a OGNI categoria pertinente alla richiesta. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility.";
+            let weightsAnalysis;
+            try {
+              const raw = await callAiProxy(weightsPrompt);
+              weightsAnalysis = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
+            } catch { weightsAnalysis = { customWeights:{}, prefersLowCmc:false }; }
+            profile = {
+              weights: weightsAnalysis.customWeights || {},
+              cmcBonus: weightsAnalysis.prefersLowCmc ? ENGINE_STYLE_PROFILES.aggressivo.cmcBonus : (() => 0)
+            };
+          } else {
+            profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
+          }
           let pool;
           if (buildSource === "collection") {
             const eligible = collection.filter(c=>canBeCommander(c));
