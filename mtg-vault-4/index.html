@@ -409,6 +409,11 @@
     // Stessi pesi validati con il prototipo simulateScoring.mjs su 260 carte.
     // L'IA non sceglie mai le singole carte qui: decide solo i parametri
     // (comandante, quante terre, eventuali categorie da premiare in più).
+    // Minimo di terre GARANTITO per livello di potenza — non dipende dall'interpretazione
+    // dell'IA: anche se l'IA suggerisce un numero più basso (es. confondendo uno stile
+    // "aggressivo" con un piano fast-mana da cEDH), il mazzo non scende mai sotto questa soglia
+    // a meno che il livello scelto sia davvero cEDH, dove terre basse sono normali.
+    const MIN_LANDS_BY_POWER = { casual: 34, ottimizzato: 30, cedh: 28 };
     const ENGINE_STYLE_PROFILES = {
       aggressivo: {
         weights: { "Beater":3, "Scaling Threat":2.5, "Voltron Piece":2, "Aristocrat":1.5, "Tribal Payoff":1.5, "Combo Piece":1 },
@@ -2506,19 +2511,19 @@
             (isCustomStyle
               ? "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
                 '{"landCount": <numero tra 28 e 41>, "customWeights": {"NomeCategoria": <numero 0-4>}, "prefersLowCmc": <true/false>}\n\n'+
-                "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana).\n"+
+                "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana). IMPORTANTE: uno stile aggressivo/veloce NON significa da solo meno terre — il numero di terre segue il LIVELLO DI POTENZA scelto, non lo stile. Se l'utente indica esplicitamente un numero o un minimo di terre nel suo testo, quello ha SEMPRE priorità su questi criteri.\n"+
                 "customWeights: interpreta ATTENTAMENTE la richiesta dell'utente (\""+deckStyleDesc+"\") e assegna un peso 0-4 a OGNI categoria pertinente — questo profilo guiderà DIRETTAMENTE quali carte vengono scelte, quindi deve riflettere davvero cosa l'utente ha chiesto (es. \"attacco letale\" deve dare peso alto a Beater/Scaling Threat/Voltron Piece, basso o nullo a Counterspell/Stax). Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility.\n"+
                 "prefersLowCmc: true se la richiesta implica velocità/aggressività (premia le carte a costo basso), false altrimenti."
               : "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
                 '{"landCount": <numero tra 28 e 41>, "categoryBoosts": {"NomeCategoria": <numero 0.5-2>}}\n\n'+
-                "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante.\n"+
+                "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante. IMPORTANTE: lo stile scelto (es. aggressivo) NON significa da solo meno terre — il numero di terre segue il LIVELLO DI POTENZA, non lo stile.\n"+
                 "categoryBoosts: 0-3 categorie da premiare in più per sinergia diretta col testo del comandante (es. se parla di sacrificio: {\"Aristocrat\": 1.5}). Lascia vuoto {} se non ci sono sinergie chiare. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility, Land.");
 
           const rawAnalysis = await callAiProxy(analysisPrompt);
           let analysis;
           try { analysis = JSON.parse(rawAnalysis.match(/\{[\s\S]*\}/)?.[0] || rawAnalysis); }
           catch { analysis = { landCount: 37, categoryBoosts: {}, customWeights: {} }; }
-          const landCount = Math.min(41, Math.max(28, Math.round(analysis.landCount || 37)));
+          const landCount = Math.min(41, Math.max(MIN_LANDS_BY_POWER[powerLevel] ?? 30, Math.round(analysis.landCount || 37)));
 
           setEngineStatus("📚 Interrogo il database carte…");
           const pool = await fetchCardCatalogByIdentity(identity, (page,soFar)=>setEngineStatus(`📚 Interrogo il database carte… (pagina ${page}, ${soFar} carte lette)`));
@@ -2792,13 +2797,13 @@
             "STILE RICHIESTO: "+autoCompleteStyle+"\nLIVELLO DI POTENZA: "+autoCompletePower+"\n\n"+
             "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
             '{"landCount": <numero tra 28 e 41>, "categoryBoosts": {"NomeCategoria": <numero 0.5-2>}}\n\n'+
-            "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante.\n"+
+            "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante. IMPORTANTE: lo stile scelto NON significa da solo meno terre — il numero di terre segue il LIVELLO DI POTENZA, non lo stile.\n"+
             "categoryBoosts: 0-3 categorie da premiare in più per sinergia diretta col testo del comandante. Lascia vuoto {} se non ci sono sinergie chiare. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility, Land.";
           const rawAnalysis = await callAiProxy(analysisPrompt);
           let analysis;
           try { analysis = JSON.parse(rawAnalysis.match(/\{[\s\S]*\}/)?.[0] || rawAnalysis); }
           catch { analysis = { landCount: 37, categoryBoosts: {} }; }
-          const targetLandCount = Math.min(41, Math.max(28, Math.round(analysis.landCount || 37)));
+          const targetLandCount = Math.min(41, Math.max(MIN_LANDS_BY_POWER[autoCompletePower] ?? 30, Math.round(analysis.landCount || 37)));
 
           const profile = ENGINE_STYLE_PROFILES[autoCompleteStyle] || ENGINE_STYLE_PROFILES.midrange;
           const boosts = analysis.categoryBoosts || {};
