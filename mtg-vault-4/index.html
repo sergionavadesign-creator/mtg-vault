@@ -1220,24 +1220,19 @@
           if (commander) text += `Commander\n1 ${commander.name}\n\n`;
           text += "Deck\n" + nonSideboard.map(c=>`${c.qty||1} ${c.name}`).join("\n");
 
-          const parseRes = await fetch("https://backend.commanderspellbook.com/card-list-from-text", {
-            method: "POST", headers: { "Content-Type": "text/plain" }, body: text
-          });
+          const proxyUrl = `${SUPABASE_URL}/functions/v1/Clever-api`;
+          const proxyHeaders = { "Content-Type": "application/json", apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` };
+
+          const parseRes = await fetch(proxyUrl, { method:"POST", headers: proxyHeaders, body: JSON.stringify({ path:"card-list-from-text", payload: text }) });
           if (!parseRes.ok) throw new Error(`card-list-from-text: HTTP ${parseRes.status}`);
           const deckList = await parseRes.json();
 
-          const bracketRes = await fetch("https://backend.commanderspellbook.com/estimate-bracket", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(deckList)
-          });
+          const bracketRes = await fetch(proxyUrl, { method:"POST", headers: proxyHeaders, body: JSON.stringify({ path:"estimate-bracket", payload: deckList }) });
           if (!bracketRes.ok) throw new Error(`estimate-bracket: HTTP ${bracketRes.status}`);
           const result = await bracketRes.json();
           setComboCheck(result);
         } catch (e) {
-          // Se questa chiamata fallisce con un errore di rete generico (non un HTTP xxx), è
-          // molto probabile un blocco CORS (il browser impedisce la chiamata diretta a un
-          // dominio esterno) — in quel caso servirà un proxy Supabase, come già fatto per
-          // Moxfield, invece di chiamare l'API direttamente dal browser.
-          setComboError(e.message||"Errore di connessione — se il problema persiste potrebbe servire un proxy (come per Moxfield) invece della chiamata diretta.");
+          setComboError(e.message||"Errore di connessione al proxy Commander Spellbook.");
         }
         setComboChecking(false);
       }
