@@ -1167,12 +1167,14 @@
       const maxCat = Math.max(1, ...catEntries.map(([,n])=>n));
 
       // Fascia di potenza: ora con una soglia RIGIDA vera (conteggio Game Changer reale dal
-      // nostro database, non più una stima) — coerente con come funziona davvero il sistema
-      // ufficiale Wizards (0 Game Changer per le fasce 1-2, fino a 3 per la fascia 3, senza
-      // limite dalla 4 in su). Il punteggio "soft" (potenza media, curva) serve SOLO a
-      // posizionarsi con precisione dentro l'intervallo che la soglia rigida permette — non
-      // decide più da solo la fascia. Le combo vere (da Commander Spellbook, se richieste) sono
-      // un segnale supplementare mostrato a parte, non ancora fuse in questo numero.
+      // nostro database, non più una stima). La soglia "fino a 3 Game Changer per il Bracket 3"
+      // è verificata contro il testo ufficiale Wizards; il resto della mappatura (confine
+      // esatto 1↔2, e cosa succede sopra 3) è una nostra estensione ragionevole del sistema
+      // ufficiale, non verificata riga per riga — da trattare con lo stesso margine di dubbio.
+      // Il punteggio "soft" (potenza media, curva) serve SOLO a posizionarsi con precisione
+      // dentro l'intervallo che la soglia rigida permette — non decide più da solo la fascia.
+      // Le combo vere (da Commander Spellbook, su richiesta) sono un segnale supplementare
+      // mostrato a parte, non ancora fuse in questo numero.
       const nonLandForBracket = cards.filter(c => !(c.type||"").toLowerCase().includes("land") && !c.isCommander);
       let bracketEstimate = null;
       if (!catLoading && nonLandForBracket.length>0) {
@@ -1203,7 +1205,7 @@
         // Dentro il range ammesso, il punteggio soft decide la posizione esatta
         const [minB,maxB] = allowedRange;
         const span = maxB-minB;
-        const normalizedSoft = Math.max(0, Math.min(1, (softScore-4)/10)); // 0..1 approssimativo
+        const normalizedSoft = Math.max(0, Math.min(1, (softScore-3)/6)); // ricalibrato sulla formula a due termini (avgPower*2 - avgCmc*0.4), range realistico circa 3-9
         const n = span===0 ? minB : Math.min(maxB, minB + Math.round(normalizedSoft*span));
         const match = BRACKETS[n-1];
         bracketEstimate = { ...match, score: softScore, avgPower, avgCmc, gameChangerCount, allowedRange };
@@ -2493,26 +2495,47 @@
           const commander = engineCommanderRef;
           const identity = commander.colorIdentity?.length ? commander.colorIdentity : (commander.colors||[]);
 
-          // Piccola chiamata IA: solo parametri, non carte
+          // Piccola chiamata IA: solo parametri, non carte. Per lo stile "personalizzato" non
+          // esiste un profilo di pesi preimpostato — quindi qui chiediamo all'IA di costruirne
+          // uno intero interpretando il testo libero, invece di far ricadere tutto su un
+          // profilo generico "midrange" che ignorerebbe quello che l'utente ha scritto.
+          const isCustomStyle = deckStyle === "personalizzato";
           const analysisPrompt = "Sei un esperto di Magic: The Gathering.\n\n"+
             "COMANDANTE: "+commander.name+"\nTipo: "+(commander.type||"")+"\nTesto: "+(commander.oracleText||"")+"\n\n"+
             "STILE RICHIESTO: "+deckStyle+(deckStyleDesc?" — "+deckStyleDesc:"")+"\nLIVELLO DI POTENZA: "+powerLevel+"\n\n"+
-            "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
-            '{"landCount": <numero tra 28 e 41>, "categoryBoosts": {"NomeCategoria": <numero 0.5-2>}}\n\n'+
-            "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante.\n"+
-            "categoryBoosts: 0-3 categorie da premiare in più per sinergia diretta col testo del comandante (es. se parla di sacrificio: {\"Aristocrat\": 1.5}). Lascia vuoto {} se non ci sono sinergie chiare. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility, Land.";
+            (isCustomStyle
+              ? "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
+                '{"landCount": <numero tra 28 e 41>, "customWeights": {"NomeCategoria": <numero 0-4>}, "prefersLowCmc": <true/false>}\n\n'+
+                "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana).\n"+
+                "customWeights: interpreta ATTENTAMENTE la richiesta dell'utente (\""+deckStyleDesc+"\") e assegna un peso 0-4 a OGNI categoria pertinente — questo profilo guiderà DIRETTAMENTE quali carte vengono scelte, quindi deve riflettere davvero cosa l'utente ha chiesto (es. \"attacco letale\" deve dare peso alto a Beater/Scaling Threat/Voltron Piece, basso o nullo a Counterspell/Stax). Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility.\n"+
+                "prefersLowCmc: true se la richiesta implica velocità/aggressività (premia le carte a costo basso), false altrimenti."
+              : "Rispondi SOLO con un oggetto JSON valido, nessun altro testo, in questo formato esatto:\n"+
+                '{"landCount": <numero tra 28 e 41>, "categoryBoosts": {"NomeCategoria": <numero 0.5-2>}}\n\n'+
+                "landCount: usa i criteri standard (casual 36-39, ottimizzato 34-38, cEDH 28-33 solo se il comandante supporta davvero un piano fast-mana) aggiustati per il costo e i bisogni di questo specifico comandante.\n"+
+                "categoryBoosts: 0-3 categorie da premiare in più per sinergia diretta col testo del comandante (es. se parla di sacrificio: {\"Aristocrat\": 1.5}). Lascia vuoto {} se non ci sono sinergie chiare. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility, Land.");
 
           const rawAnalysis = await callAiProxy(analysisPrompt);
           let analysis;
           try { analysis = JSON.parse(rawAnalysis.match(/\{[\s\S]*\}/)?.[0] || rawAnalysis); }
-          catch { analysis = { landCount: 37, categoryBoosts: {} }; }
+          catch { analysis = { landCount: 37, categoryBoosts: {}, customWeights: {} }; }
           const landCount = Math.min(41, Math.max(28, Math.round(analysis.landCount || 37)));
 
           setEngineStatus("📚 Interrogo il database carte…");
           const pool = await fetchCardCatalogByIdentity(identity, (page,soFar)=>setEngineStatus(`📚 Interrogo il database carte… (pagina ${page}, ${soFar} carte lette)`));
 
-          const profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
-          const boosts = analysis.categoryBoosts || {};
+          let profile;
+          if (isCustomStyle) {
+            // Nessun profilo preimpostato qui: i pesi vengono INTERAMENTE dall'interpretazione
+            // IA del testo libero, non da "midrange" con qualche aggiustamento sopra.
+            const customWeights = analysis.customWeights || {};
+            profile = {
+              weights: customWeights,
+              cmcBonus: analysis.prefersLowCmc ? ENGINE_STYLE_PROFILES.aggressivo.cmcBonus : (() => 0)
+            };
+          } else {
+            profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
+          }
+          const boosts = isCustomStyle ? {} : (analysis.categoryBoosts || {});
           const effectiveWeights = { ...profile.weights };
           Object.entries(boosts).forEach(([cat,val]) => { effectiveWeights[cat] = (effectiveWeights[cat]||0) + Number(val||0); });
           const effectiveProfile = { weights: effectiveWeights, cmcBonus: profile.cmcBonus };
@@ -2673,6 +2696,10 @@
       // per scegliere le 99 carte — così un comandante "da valore lento" non finisce suggerito
       // per uno stile "aggressivo" solo perché l'IA lo ricordava genericamente forte.
       async function suggestCommandersEngine() {
+        if (deckStyle === "personalizzato") {
+          alert("Il suggerimento comandanti non supporta ancora lo stile \"Personalizzato\" (richiederebbe interpretare il tuo testo libero, non ancora collegato qui). Usa 🔍 Nome o 🎲 A caso, oppure scegli uno stile preimpostato per questo suggerimento.");
+          return;
+        }
         setEngineSearching(true); setEngineCommanderResults([]);
         try {
           const profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
