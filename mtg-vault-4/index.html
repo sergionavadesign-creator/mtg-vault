@@ -2700,6 +2700,7 @@
       // database delle creature leggendarie e applica lo STESSO motore di punteggio già usato
       // per scegliere le 99 carte — così un comandante "da valore lento" non finisce suggerito
       // per uno stile "aggressivo" solo perché l'IA lo ricordava genericamente forte.
+      const COLOR_NAME_HINTS = { W:"bianco/Piana", U:"blu/Isola", B:"nero/Palude", R:"rosso/Montagna", G:"verde/Foresta" };
       async function suggestCommandersEngine() {
         if (deckStyle === "personalizzato" && !deckStyleDesc.trim()) {
           alert("Scrivi prima cosa cerchi nel campo di testo (es. \"attacco letale\"), poi premi di nuovo — non c'è ancora nulla da interpretare.");
@@ -2708,22 +2709,29 @@
         setEngineSearching(true); setEngineCommanderResults([]);
         try {
           let profile;
+          let requestedColors = null; // null = nessuna richiesta di colore esplicita nel testo
           if (deckStyle === "personalizzato") {
             // Stessa logica usata per la costruzione del mazzo: nessun profilo preimpostato,
-            // i pesi vengono dall'interpretazione IA del testo libero.
+            // i pesi vengono dall'interpretazione IA del testo libero. In più, estraiamo anche
+            // un'eventuale richiesta di colore/mana esplicita (es. "mono nero", "palude",
+            // "Rakdos") — prima veniva ignorata, usando solo il tema e mai il colore richiesto.
             const weightsPrompt = "Sei un esperto di Magic: The Gathering. Un giocatore vuole un comandante adatto a questa richiesta: \""+deckStyleDesc+"\".\n\n"+
               "Rispondi SOLO con un oggetto JSON valido, nessun altro testo:\n"+
-              '{"customWeights": {"NomeCategoria": <numero 0-4>}, "prefersLowCmc": <true/false>}\n\n'+
-              "Assegna un peso a OGNI categoria pertinente alla richiesta. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility.";
+              '{"customWeights": {"NomeCategoria": <numero 0-4>}, "prefersLowCmc": <true/false>, "requestedColors": [<lettere tra W,U,B,R,G>]}\n\n'+
+              "Assegna un peso a OGNI categoria pertinente alla richiesta. Le categorie valide sono: Ramp, Mana Fixing, Card Draw, Removal, Board Wipe, Counterspell, Stax/Disruption, Recursion, Beater, Scaling Threat, Voltron Piece, Aristocrat, Tribal Payoff, Combo Piece, Value Creature, Win Condition, Utility.\n"+
+              "requestedColors: SOLO se il testo richiede esplicitamente un colore o combinazione di mana (es. \"mono nero\", \"palude\", \"Rakdos\", \"bianco-verde\") — l'identità cromatica ESATTA richiesta, come array di lettere (W=bianco, U=blu, B=nero, R=rosso, G=verde). Lascia [] se non c'è nessuna richiesta di colore nel testo.";
             let weightsAnalysis;
             try {
               const raw = await callAiProxy(weightsPrompt);
               weightsAnalysis = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
-            } catch { weightsAnalysis = { customWeights:{}, prefersLowCmc:false }; }
+            } catch { weightsAnalysis = { customWeights:{}, prefersLowCmc:false, requestedColors:[] }; }
             profile = {
               weights: weightsAnalysis.customWeights || {},
               cmcBonus: weightsAnalysis.prefersLowCmc ? ENGINE_STYLE_PROFILES.aggressivo.cmcBonus : (() => 0)
             };
+            if (Array.isArray(weightsAnalysis.requestedColors) && weightsAnalysis.requestedColors.length>0) {
+              requestedColors = weightsAnalysis.requestedColors.map(c=>String(c).toUpperCase()).filter(c=>"WUBRG".includes(c));
+            }
           } else {
             profile = ENGINE_STYLE_PROFILES[deckStyle] || ENGINE_STYLE_PROFILES.midrange;
           }
@@ -2745,6 +2753,17 @@
             pool = rows.map(r => ({ ...r, legalities: safeJsonField(r.legalities,{}), prices: safeJsonField(r.prices,{}), image_uris: safeJsonField(r.image_uris,{}) }));
           }
           pool = pool.filter(r => (r.type_line||"").toLowerCase().includes("legendary") && (r.type_line||"").toLowerCase().includes("creature"));
+          if (requestedColors) {
+            const before = pool.length;
+            pool = pool.filter(r => {
+              const idArr = (r.color_identity||[]).map(c=>String(c).toUpperCase());
+              return idArr.length===requestedColors.length && requestedColors.every(c=>idArr.includes(c));
+            });
+            if (pool.length===0) {
+              alert(`Nessun comandante trovato con identità cromatica esatta ${requestedColors.join("")} (richiesta letta dal tuo testo). Su ${before} candidati nessuno corrisponde — prova a riformulare, o cerca per nome.`);
+              setEngineSearching(false); return;
+            }
+          }
           const scored = pool
             .map(r => ({ row:r, score: scoreCatalogCard(r, profile) }))
             .sort((a,b)=>b.score-a.score)
