@@ -1131,12 +1131,83 @@
       });
       return `conic-gradient(${stops.join(",")})`;
     }
+    // Mappa sinergie: mostra solo le carte coinvolte in almeno una combo VERA (da Commander
+    // Spellbook), non tutte le carte del mazzo per stessa categoria — altrimenti sarebbe solo
+    // scenografia senza un dato reale dietro. L'id di ogni combo è tipo "4131-4235": sono gli ID
+    // numerici Commander Spellbook delle carte coinvolte, uniti da un trattino — li mappiamo di
+    // nuovo ai nomi usando l'elenco `cards[]` che la stessa risposta di estimate-bracket include.
+    function SynergyGraph({ comboCheck }) {
+      const [hoveredEdge, setHoveredEdge] = useState(null);
+      if (!comboCheck || !comboCheck.combos || comboCheck.combos.length===0) return null;
+
+      const idToName = {};
+      (comboCheck.cards||[]).forEach(c => { if (c.card?.id!=null) idToName[c.card.id] = c.card.name; });
+
+      const edges = [];
+      const nodeSet = new Set();
+      comboCheck.combos.forEach(c => {
+        const parts = String(c.combo?.id||"").split("-").map(s=>parseInt(s)).filter(n=>!isNaN(n));
+        const names = parts.map(id=>idToName[id]).filter(Boolean);
+        for (let a=0;a<names.length;a++) for (let b=a+1;b<names.length;b++) {
+          edges.push({ from:names[a], to:names[b],
+            produces: (c.combo?.produces||[]).map(p=>p.feature?.name).filter(Boolean).join(", ") || "Combo rilevata",
+            desc: c.combo?.description||"" });
+          nodeSet.add(names[a]); nodeSet.add(names[b]);
+        }
+      });
+      const nodes = [...nodeSet];
+      if (nodes.length===0) {
+        return <div style={{fontSize:11,color:"#64748b"}}>Non riesco a identificare le carte esatte delle combo trovate con i dati disponibili.</div>;
+      }
+
+      const W=560, H=380, R=140, CX=W/2, CY=H/2;
+      const pos = {};
+      nodes.forEach((n,i) => {
+        const angle = (i/nodes.length)*2*Math.PI - Math.PI/2;
+        pos[n] = { x: CX+R*Math.cos(angle), y: CY+R*Math.sin(angle) };
+      });
+
+      return (
+        <div>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:340,background:"#0a0a0f",borderRadius:8}}>
+            {edges.map((e,i) => (
+              <line key={i} x1={pos[e.from].x} y1={pos[e.from].y} x2={pos[e.to].x} y2={pos[e.to].y}
+                stroke="#f59e0b" strokeWidth={hoveredEdge===i?3:1.5} opacity={hoveredEdge===i?1:0.45}
+                onMouseEnter={()=>setHoveredEdge(i)} onMouseLeave={()=>setHoveredEdge(null)} style={{cursor:"pointer"}} />
+            ))}
+            {nodes.map(n => (
+              <g key={n}>
+                <circle cx={pos[n].x} cy={pos[n].y} r={7} fill="#1e1b2e" stroke="#f59e0b" strokeWidth={2} />
+                <text x={pos[n].x} y={pos[n].y-12} textAnchor="middle" fontSize={10} fill="#cbd5e1">
+                  {n.length>20?n.slice(0,18)+"…":n}
+                </text>
+              </g>
+            ))}
+          </svg>
+          {hoveredEdge!=null && edges[hoveredEdge] && (
+            <div style={{fontSize:11,color:"#94a3b8",marginTop:8,background:"#151220",borderRadius:6,padding:8}}>
+              <div style={{fontWeight:700,color:"#f59e0b",marginBottom:2}}>{edges[hoveredEdge].produces}</div>
+              <div>{edges[hoveredEdge].desc}</div>
+            </div>
+          )}
+          {hoveredEdge==null && <div style={{fontSize:10,color:"#4a4570",marginTop:6}}>Passa il mouse su una linea per i dettagli della combo.</div>}
+        </div>
+      );
+    }
+
     function DeckStatsPanel({ cards }) {
       const [catTags, setCatTags] = useState({}); // nome carta (canonico) -> { primary_category, ... }
       const [catLoading, setCatLoading] = useState(false);
       const [comboCheck, setComboCheck] = useState(null); // risultato Commander Spellbook, o null se non ancora richiesto
       const [comboChecking, setComboChecking] = useState(false);
       const [comboError, setComboError] = useState(null);
+      const [showSynergyGraph, setShowSynergyGraph] = useState(false);
+      const [isDesktop, setIsDesktop] = useState(typeof window!=="undefined" && window.innerWidth >= 900);
+      useEffect(() => {
+        const onResize = () => setIsDesktop(window.innerWidth >= 900);
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+      }, []);
       const lands = cards.filter(c => (c.type||"").toLowerCase().includes("land"));
       const landCount = lands.reduce((s,c)=>s+(c.qty||1),0);
 
@@ -1308,6 +1379,17 @@
                   <div style={{fontSize:11,color:"#64748b"}}>Nessuna combo nota trovata tra le carte del mazzo.</div>
                 )}
                 <button style={{...S.btnGhost,width:"100%",marginTop:8,fontSize:11}} onClick={checkCombosOnSpellbook}>🔄 Ricontrolla</button>
+                {comboCheck.combos?.length>0 && isDesktop && (
+                  <>
+                    <button style={{...S.btnGhost,width:"100%",marginTop:8,fontSize:11}} onClick={()=>setShowSynergyGraph(o=>!o)}>
+                      🕸️ {showSynergyGraph?"Nascondi mappa sinergie":"Mostra mappa sinergie"}
+                    </button>
+                    {showSynergyGraph && <div style={{marginTop:8}}><SynergyGraph comboCheck={comboCheck} /></div>}
+                  </>
+                )}
+                {comboCheck.combos?.length>0 && !isDesktop && (
+                  <div style={{fontSize:10,color:"#4a4570",marginTop:8}}>🕸️ La mappa sinergie visiva è disponibile solo da schermo largo (desktop).</div>
+                )}
               </>
             )}
           </div>
