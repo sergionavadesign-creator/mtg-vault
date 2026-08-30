@@ -1,6 +1,6 @@
 {
-  "name": "MyMagic — MTG Vault",
-  "short_name": "MyMagic",
+  "name": "MyCommander",
+  "short_name": "MyCommander",
   "description": "Collezione, mazzi e Motore V2 per Commander",
   "start_url": "./",
   "scope": "./",

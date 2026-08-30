@@ -6,7 +6,7 @@
 // Va in cache solo l'essenziale per un'esperienza offline minima; i dati
 // (Supabase, Scryfall) passano sempre dalla rete, mai dalla cache.
 
-const CACHE_VERSION = "mymagic-shell-v1";
+const CACHE_VERSION = "mycommander-shell-v1";
 const SHELL_FILES = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {
