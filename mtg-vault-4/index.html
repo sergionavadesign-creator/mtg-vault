@@ -476,7 +476,29 @@
       Object.entries(BASIC_TYPE_TO_COLOR).forEach(([type,color]) => { if (text.includes(type)) found.add(color); });
       return found.size ? found : null;
     }
-    function scoreLandCard(row, identityColors) {
+    // Terre "a mana ristretto" (es. Mishra's Workshop: "spend this mana only to cast artifact
+    // spells") sono forti SOLO se il mazzo ha davvero abbastanza carte del tipo richiesto da
+    // spendere quel mana — altrimenti è spesso una terra morta in mano. Riconosciamo il pattern
+    // dal testo ed estraiamo il tipo di carta richiesto.
+    function restrictedManaType(row) {
+      const text = (row.oracle_text||row.oracleText||"").toLowerCase();
+      const m = text.match(/spend this mana only to cast ([a-z]+) spells/);
+      return m ? m[1] : null; // es. "artifact"
+    }
+    // Pacchetto Tron (Urza's Tower/Mine/Power Plant): un pezzo isolato, senza gli altri due,
+    // è debole — in Commander (singleton) non c'è modo di "pescarne di più", quindi va tutto
+    // o niente. Lo gestiamo togliendo dai candidati i pezzi che non hanno il pacchetto completo
+    // disponibile nel pool, PRIMA di arrivare al punteggio per singola carta.
+    const TRON_PIECES = new Set(["urza's tower","urza's mine","urza's power plant"]);
+    function filterIncompleteTronPackage(landCandidates) {
+      const presentNames = new Set(landCandidates.map(r=>canonicalCardName(r.name)).filter(n=>TRON_PIECES.has(n)));
+      if (presentNames.size>0 && presentNames.size<3) {
+        // Pacchetto incompleto nel pool disponibile: i pezzi isolati non hanno valore da soli
+        return landCandidates.filter(r => !TRON_PIECES.has(canonicalCardName(r.name)));
+      }
+      return landCandidates;
+    }
+    function scoreLandCard(row, identityColors, deckContext) {
       let score = (row.power_level ?? 3) * 2 + (row.is_staple ? 2 : 0);
       const idSet = new Set(identityColors||[]);
       const hasEnrichedData = row.mana_costs_life !== undefined && row.fetches_basic_types !== undefined;
@@ -497,6 +519,16 @@
           const hasUsefulTarget = [...fetchable].some(c => idSet.has(c));
           if (!hasUsefulTarget) score -= 15;
         }
+      }
+
+      // Mana ristretto (es. Mishra's Workshop): penalità se il mazzo non ha abbastanza carte
+      // del tipo richiesto da giustificarla. Serve `deckContext.typeCounts` (conteggio carte
+      // già scelte per tipo) — se non disponibile in questo punto di chiamata, non applichiamo
+      // né bonus né penalità (meglio non giudicare senza dati, piuttosto che sbagliare).
+      const restrictedType = restrictedManaType(row);
+      if (restrictedType && deckContext?.typeCounts) {
+        const count = deckContext.typeCounts[restrictedType] || 0;
+        if (count < 15) score -= 10; // troppo poche carte del tipo richiesto: terra quasi morta
       }
       return score;
     }
@@ -1160,7 +1192,7 @@
         return <div style={{fontSize:11,color:"#64748b"}}>Non riesco a identificare le carte esatte delle combo trovate con i dati disponibili.</div>;
       }
 
-      const W=560, H=380, R=140, CX=W/2, CY=H/2;
+      const W=680, H=440, R=170, CX=W/2, CY=H/2;
       const pos = {};
       nodes.forEach((n,i) => {
         const angle = (i/nodes.length)*2*Math.PI - Math.PI/2;
@@ -1169,7 +1201,7 @@
 
       return (
         <div>
-          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:340,background:"#0a0a0f",borderRadius:8}}>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:400,background:"#0a0a0f",borderRadius:8}}>
             {edges.map((e,i) => (
               <line key={i} x1={pos[e.from].x} y1={pos[e.from].y} x2={pos[e.to].x} y2={pos[e.to].y}
                 stroke="#f59e0b" strokeWidth={hoveredEdge===i?3:1.5} opacity={hoveredEdge===i?1:0.45}
@@ -1184,13 +1216,15 @@
               </g>
             ))}
           </svg>
+          {/* Nessun limite di altezza qui: il testo (spesso lungo, in inglese) deve sempre
+              essere leggibile per intero — è il popup che contiene tutto a scorrere, non questo box */}
           {hoveredEdge!=null && edges[hoveredEdge] && (
-            <div style={{fontSize:11,color:"#94a3b8",marginTop:8,background:"#151220",borderRadius:6,padding:8}}>
-              <div style={{fontWeight:700,color:"#f59e0b",marginBottom:2}}>{edges[hoveredEdge].produces}</div>
+            <div style={{fontSize:12,lineHeight:1.5,color:"#cbd5e1",marginTop:10,background:"#0e0c16",border:"1px solid #2d2b3e",borderRadius:6,padding:12,wordBreak:"break-word"}}>
+              <div style={{fontWeight:700,color:"#f59e0b",marginBottom:6}}>{edges[hoveredEdge].produces}</div>
               <div>{edges[hoveredEdge].desc}</div>
             </div>
           )}
-          {hoveredEdge==null && <div style={{fontSize:10,color:"#4a4570",marginTop:6}}>Passa il mouse su una linea per i dettagli della combo.</div>}
+          {hoveredEdge==null && <div style={{fontSize:10,color:"#4a4570",marginTop:8}}>Passa il mouse su una linea per i dettagli della combo.</div>}
         </div>
       );
     }
@@ -1340,6 +1374,19 @@
 
       return (
         <div className="fade-in">
+          {showSynergyGraph && (
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}
+              onClick={()=>setShowSynergyGraph(false)}>
+              <div style={{background:"#151220",borderRadius:12,padding:20,width:"100%",maxWidth:820,maxHeight:"88vh",overflowY:"auto",border:"1px solid #2d2b3e"}}
+                onClick={e=>e.stopPropagation()}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                  <span style={{fontWeight:700,fontSize:15}}>🕸️ Mappa sinergie</span>
+                  <button style={S.btnGhost} onClick={()=>setShowSynergyGraph(false)}>✕</button>
+                </div>
+                <SynergyGraph comboCheck={comboCheck} />
+              </div>
+            </div>
+          )}
           {bracketEstimate && (
             <div style={{background:"#0e0c16",borderRadius:10,padding:"14px 16px",marginBottom:14,border:"1px solid #2d2b3e"}}>
               <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4}}>
@@ -1380,12 +1427,9 @@
                 )}
                 <button style={{...S.btnGhost,width:"100%",marginTop:8,fontSize:11}} onClick={checkCombosOnSpellbook}>🔄 Ricontrolla</button>
                 {comboCheck.combos?.length>0 && isDesktop && (
-                  <>
-                    <button style={{...S.btnGhost,width:"100%",marginTop:8,fontSize:11}} onClick={()=>setShowSynergyGraph(o=>!o)}>
-                      🕸️ {showSynergyGraph?"Nascondi mappa sinergie":"Mostra mappa sinergie"}
-                    </button>
-                    {showSynergyGraph && <div style={{marginTop:8}}><SynergyGraph comboCheck={comboCheck} /></div>}
-                  </>
+                  <button style={{...S.btnGhost,width:"100%",marginTop:8,fontSize:11}} onClick={()=>setShowSynergyGraph(true)}>
+                    🕸️ Mostra mappa sinergie
+                  </button>
                 )}
                 {comboCheck.combos?.length>0 && !isDesktop && (
                   <div style={{fontSize:10,color:"#4a4570",marginTop:8}}>🕸️ La mappa sinergie visiva è disponibile solo da schermo largo (desktop).</div>
@@ -2638,7 +2682,7 @@
             (r.legalities?.commander === "legal") &&
             !isLandType(r) // le terre le trattiamo a parte, sotto
           );
-          let landCandidates = pool.filter(r => isLandType(r) && (r.legalities?.commander === "legal"));
+          let landCandidates = filterIncompleteTronPackage(pool.filter(r => isLandType(r) && (r.legalities?.commander === "legal")));
 
           const ownedByName = {};
           collection.forEach(oc => {
@@ -2653,15 +2697,12 @@
           setEngineStatus("⚖️ Calcolo il punteggio delle carte…");
           const scoreSort = (list, scoreFn) => list.map(r => ({ row:r, score: scoreFn(r) })).sort((a,b)=>b.score-a.score);
           const nonLandScoreFn = r => scoreCatalogCard(r, effectiveProfile);
-          const landScoreFn = r => scoreLandCard(r, identity);
 
-          let scoredNonLands, scoredLands;
+          let scoredNonLands;
           if (buildSource === "collection") {
             scoredNonLands = [...scoreSort(candidates.filter(isOwned), nonLandScoreFn), ...scoreSort(candidates.filter(r=>!isOwned(r)), nonLandScoreFn)];
-            scoredLands = [...scoreSort(landCandidates.filter(isOwned), landScoreFn), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), landScoreFn)];
           } else {
             scoredNonLands = scoreSort(candidates, nonLandScoreFn);
-            scoredLands = scoreSort(landCandidates, landScoreFn);
           }
 
           // Singleton: un nome per carta (le terre base sono l'eccezione, gestite a parte)
@@ -2675,6 +2716,22 @@
             nonLandPicks.push(row);
             if (nonLandPicks.length >= 99 - landCount) break;
           }
+
+          // Solo ORA che le carte non-terra sono decise, conosciamo la composizione del mazzo
+          // — serve per giudicare bene le terre a mana ristretto (es. Mishra's Workshop, utile
+          // solo se ci sono abbastanza artefatti da spendere quel mana).
+          const typeCounts = {};
+          nonLandPicks.forEach(r => {
+            const tl = (r.type_line||"").toLowerCase();
+            ["artifact","creature","enchantment","instant","sorcery","planeswalker"].forEach(t => {
+              if (tl.includes(t)) typeCounts[t] = (typeCounts[t]||0)+1;
+            });
+          });
+          const landScoreFn = r => scoreLandCard(r, identity, { typeCounts });
+          const scoredLands = buildSource === "collection"
+            ? [...scoreSort(landCandidates.filter(isOwned), landScoreFn), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), landScoreFn)]
+            : scoreSort(landCandidates, landScoreFn);
+
           const landPicks = [];
           for (const {row} of scoredLands) {
             const key = canonicalCardName(row.name);
@@ -2932,15 +2989,12 @@
 
             setAutoCompleteStatus("⚖️ Scelgo le carte mancanti…");
             const candidates = pool.filter(r => !isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
-            const landCandidates = pool.filter(r => isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal");
+            const landCandidates = filterIncompleteTronPackage(pool.filter(r => isLandType(r) && !alreadyUsedNames.has(canonicalCardName(r.name)) && r.legalities?.commander==="legal"));
             const scoreSort = (list, scoreFn) => list.map(r => ({ row:r, score: scoreFn(r) })).sort((a,b)=>b.score-a.score);
             // In modalità "tutte le carte esistenti" ignoriamo il possesso: si sceglie solo per punteggio
             const scoredNonLands = autoCompleteSource==="collection"
               ? [...scoreSort(candidates.filter(isOwned), r=>scoreCatalogCard(r,effectiveProfile)), ...scoreSort(candidates.filter(r=>!isOwned(r)), r=>scoreCatalogCard(r,effectiveProfile))]
               : scoreSort(candidates, r=>scoreCatalogCard(r,effectiveProfile));
-            const scoredLands = autoCompleteSource==="collection"
-              ? [...scoreSort(landCandidates.filter(isOwned), r=>scoreLandCard(r,identity)), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), r=>scoreLandCard(r,identity))]
-              : scoreSort(landCandidates, r=>scoreLandCard(r,identity));
 
             const BASIC_LAND_BY_COLOR = { W:"Plains", U:"Island", B:"Swamp", R:"Mountain", G:"Forest" };
             const newlyUsed = new Set(alreadyUsedNames);
@@ -2951,6 +3005,21 @@
               newlyUsed.add(key); nonLandPicks.push(row);
               if (nonLandPicks.length >= nonLandsStillNeeded) break;
             }
+
+            // Conteggio tipi sulla composizione FINALE (carte già nel mazzo + quelle appena
+            // scelte) — serve a giudicare bene le terre a mana ristretto tipo Mishra's Workshop.
+            const typeCounts = {};
+            [...existingCards, ...nonLandPicks].forEach(c => {
+              const tl = (c.type||c.type_line||"").toLowerCase();
+              ["artifact","creature","enchantment","instant","sorcery","planeswalker"].forEach(t => {
+                if (tl.includes(t)) typeCounts[t] = (typeCounts[t]||0)+1;
+              });
+            });
+            const landScoreFn = r => scoreLandCard(r, identity, { typeCounts });
+            const scoredLands = autoCompleteSource==="collection"
+              ? [...scoreSort(landCandidates.filter(isOwned), landScoreFn), ...scoreSort(landCandidates.filter(r=>!isOwned(r)), landScoreFn)]
+              : scoreSort(landCandidates, landScoreFn);
+
             const landPicks = [];
             for (const {row} of scoredLands) {
               const key = canonicalCardName(row.name);
